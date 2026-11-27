@@ -31,23 +31,37 @@ jobs:
 
       - name: Assemble debug APK
         working-directory: android
-        run: gradle :app:assembleDebug --no-daemon --stacktrace
+        run: |
+          set -o pipefail
+          gradle :app:assembleDebug --no-daemon --stacktrace 2>&1 | tee ../build.log
 
       - name: Collect APK
+        if: success()
         run: |
           mkdir -p out
           cp android/app/build/outputs/apk/debug/app-debug.apk out/pp360-ble.apk
           ls -lh out/pp360-ble.apk
 
       - name: Upload artifact
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: pp360-ble-apk
           path: out/pp360-ble.apk
 
       - name: Publish to Release
+        if: success()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release view latest >/dev/null 2>&1 || gh release create latest --title "拍拍360 安卓版 APK" --notes "GitHub Actions 自动构建，debug 签名，安装时允许未知来源即可。"
           gh release upload latest out/pp360-ble.apk --clobber
+
+      - name: Upload build log on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view latest >/dev/null 2>&1 || gh release create latest --title "拍拍360 安卓版 APK" --notes "GitHub Actions 自动构建，debug 签名，安装时允许未知来源即可。"
+          if [ -f build.log ]; then tail -c 200000 build.log > p360-build.log; else echo "no build.log captured" > p360-build.log; fi
+          gh release upload latest p360-build.log --clobber
