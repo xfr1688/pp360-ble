@@ -9,7 +9,9 @@ import android.hardware.Camera;
 import android.media.FaceDetector;
 import android.os.Handler;
 import android.os.Looper;
+import android.view.Display;
 import android.view.TextureView;
+import android.view.WindowManager;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -26,6 +28,7 @@ import java.util.concurrent.Executors;
  * 人脸检测不再依赖相机 HAL 的 FaceDetection（国产 ROM 经常不实现，这是上一版“抓拍不能用”的原因），
  * 改用 android.media.FaceDetector 在预览帧上做软件检测，只要有帧就能跑。
  * 拍照前先 autoFocus 并对焦超时做兜底，避免“拍得糊”。
+ * 预览方向与 JPEG 方向都按设备旋转角实时计算，横屏、倒竖屏拍出来都是正的。
  */
 class CameraController implements TextureView.SurfaceTextureListener {
 
@@ -38,7 +41,7 @@ class CameraController implements TextureView.SurfaceTextureListener {
 
         void camShot(String path);
 
-        /** nx、ny 归一化到 -0.5~0.5，size 为眼距占检测宽度的百分比 */
+        /** nx、ny 归一化到 -0.5~0.5（传感器坐标系），size 为眼距占检测宽度的百分比 */
         void camFace(float nx, float ny, int size);
     }
 
@@ -59,6 +62,7 @@ class CameraController implements TextureView.SurfaceTextureListener {
     private boolean takeDone = false;
     private long lastDetect = 0;
     private volatile boolean detecting = false;
+    private int dispDeg = 90;
 
     CameraController(Context ctx, Cb cb) {
         this.ctx = ctx;
@@ -84,6 +88,54 @@ class CameraController implements TextureView.SurfaceTextureListener {
 
     boolean isOpen() {
         return cam != null;
+    }
+
+    /** 当前预览旋转角（0/90/180/270），ShootActivity 用它把检测坐标映射到屏幕坐标 */
+    int displayOrientation() {
+        return dispDeg;
+    }
+
+    /** 设备方向变化后重新设置预览方向 */
+    synchronized void applyOrientation() {
+        if (cam == null) {
+            return;
+        }
+        Camera.CameraInfo info = new Camera.CameraInfo();
+        try {
+            Camera.getCameraInfo(0, info);
+        } catch (Exception e) {
+            return;
+        }
+        dispDeg = calcDeg(info.orientation, deviceRotation(),
+                info.facing == Camera.CameraInfo.CAMERA_FACING_FRONT);
+        try {
+            cam.setDisplayOrientation(dispDeg);
+        } catch (Exception ignored) {
+        }
+        cb.camLog("预览方向 → " + dispDeg + "°");
+    }
+
+    /** 官方公式：后摄 (cameraOrientation - deviceDeg + 360) % 360；前摄取镜像补角 */
+    static int calcDeg(int cameraOrientation, int deviceDeg, boolean front) {
+        int r;
+        if (front) {
+            r = (cameraOrientation + deviceDeg) % 360;
+            r = (360 - r) % 360;
+        } else {
+            r = (cameraOrientation - deviceDeg + 360) % 360;
+        }
+        return r;
+    }
+
+    /** 设备当前旋转角度：0/90/180/270 */
+    int deviceRotation() {
+        try {
+            WindowManager wm = (WindowManager) ctx.getSystemService(Context.WINDOW_SERVICE);
+            Display d = wm.getDefaultDisplay();
+            return d.getRotation() * 90;
+        } catch (Exception e) {
+            return 0;
+        }
     }
 
     int width() {
@@ -272,7 +324,15 @@ class CameraController implements TextureView.SurfaceTextureListener {
                 }
             }
             c.setParameters(p);
-            c.setDisplayOrientation(90);
+            Camera.CameraInfo ci = new Camera.CameraInfo();
+            try {
+                Camera.getCameraInfo(0, ci);
+                dispDeg = calcDeg(ci.orientation, deviceRotation(),
+                        ci.facing == Camera.CameraInfo.CAMERA_FACING_FRONT);
+            } catch (Exception e) {
+                dispDeg = 90;
+            }
+            c.setDisplayOrientation(dispDeg);
             c.setPreviewTexture(tv.getSurfaceTexture());
             c.startPreview();
             cam = c;
@@ -364,10 +424,25 @@ class CameraController implements TextureView.SurfaceTextureListener {
         }
     }
 
+    /** JPEG 方向角，拍出来的照片才正立（横屏、倒竖屏都跟着走） */
+    private int jpegDeg() {
+        try {
+            Camera.CameraInfo ci = new Camera.CameraInfo();
+            Camera.getCameraInfo(0, ci);
+            int rot = deviceRotation();
+            if (ci.facing == Camera.CameraInfo.CAMERA_FACING_FRONT) {
+                return (ci.orientation + rot) % 360;
+            }
+            return (ci.orientation - rot + 360) % 360;
+        } catch (Exception e) {
+            return 90;
+        }
+    }
+
     private void doTake(final Camera c, final String tag) {
         try {
             Camera.Parameters p = c.getParameters();
-            p.setRotation(90);
+            p.setRotation(jpegDeg());
             p.setJpegQuality(92);
             c.setParameters(p);
         } catch (Exception ignored) {
@@ -435,6 +510,7 @@ class CameraController implements TextureView.SurfaceTextureListener {
 
     @Override
     public void onSurfaceTextureSizeChanged(SurfaceTexture st, int w, int h) {
+        applyOrientation();
     }
 
     @Override
