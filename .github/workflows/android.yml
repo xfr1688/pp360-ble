@@ -51,40 +51,54 @@ jobs:
 
       - name: Publish to Release
         if: success()
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release view latest >/dev/null 2>&1 || gh release create latest --title "拍拍360 安卓版 APK" --notes "GitHub Actions 自动构建，debug 签名，安装时允许未知来源即可。"
-          gh release upload latest out/pp360-ble.apk --clobber
+          set +e
+          { gh release view latest >/dev/null 2>&1 || gh release create latest --title "拍拍360 安卓版 APK" --notes "GitHub Actions 自动构建，debug 签名，安装时允许未知来源即可。"; } >> publish.log 2>&1
+          gh release upload latest out/pp360-ble.apk --clobber >> publish.log 2>&1
+          echo "latest upload exit=$?" >> publish.log
 
       - name: Publish version releases
         if: always()
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set +e
+          touch publish.log
           publish() {
             tag="$1"; target="$2"; title="$3"; notes="$4"; asset="$5"
-            if gh release view "$tag" >/dev/null 2>&1; then
-              echo "release $tag already exists, skip"
+            echo "=== $tag ===" >> publish.log
+            if gh release view "$tag" >> publish.log 2>&1; then
+              echo "$tag already exists" >> publish.log
               return 0
             fi
             if [ -n "$asset" ] && [ -f "$asset" ]; then
-              gh release create "$tag" "$asset" --target "$target" --title "$title" --notes "$notes"
+              gh release create "$tag" "$asset" --target "$target" --title "$title" --notes "$notes" >> publish.log 2>&1
             else
-              gh release create "$tag" --target "$target" --title "$title" --notes "$notes"
+              gh release create "$tag" --target "$target" --title "$title" --notes "$notes" >> publish.log 2>&1
             fi
-            echo "released $tag"
+            echo "create exit=$?" >> publish.log
           }
-          publish "v0.3" "be97515" "PP360 v0.3 - 相机拍摄" "单拍 / 定时（3s×6、5s×12、10s×18）/ 全景 18 格 / 人脸抓拍四种模式；拍摄页独立 Activity，相机生命周期与页面绑定。本版 APK 未存档，可检出该 tag 源码自行构建。" ""
+          publish "v0.3" "be97515" "PP360 v0.3 - 相机拍摄" "单拍 / 定时（3s×6、5s×12、10s×18）/ 全景 18 格 / 人脸抓拍四种模式；拍摄页为独立 Activity，相机生命周期与页面绑定。本版 APK 未存档，可检出该 tag 源码自行构建。" ""
           publish "v0.4" "0634d06" "PP360 v0.4 - 自适应图标 + 应用内相册" "桌面矢量自适应图标（Android 8+ 不套白底）；拍摄页真实缩略图；应用内相册（看大图 / 长按删除）。本版 APK 未存档，可检出该 tag 源码自行构建。" ""
-          publish "v0.5" "aa4e843" "PP360 v0.5 - 修复抓拍 / 全景 / 多选" "人脸检测改用 android.media.FaceDetector 软件检测；拍照前 autoFocus + 900ms 兜底对焦；抓拍连续 3 帧命中再停转拍摄；全景 18 张自动拼成一张展开图；相册多选删除 / 多选导出到 Pictures/PP360。" ""
-          publish "v0.6" "9e3ff94" "PP360 v0.6 - 横竖屏自适应" "预览方向与 JPEG 方向按设备旋转角实时计算（横屏 / 倒竖屏拍出来都是正的）；预览按真实比例居中裁满不变形；横屏时上下栏自动收窄、相册变 5 列；全景横屏切 40% 更宽、拼接统一高度并提升到 960px；抓拍中心判据放宽并加 60 秒兜底自动停。" "out/pp360-ble.apk"
+          publish "v0.5" "aa4e843" "PP360 v0.5 - 修复抓拍 / 全景 / 多选" "人脸检测改用 android.media.FaceDetector 软件检测；拍照前 autoFocus + 900ms 兜底；抓拍连续 3 帧命中再停转拍摄；全景 18 张自动拼成一张展开图；相册多选删除 / 多选导出到 Pictures/PP360。" ""
+          publish "v0.6" "9e3ff94" "PP360 v0.6 - 横竖屏自适应" "预览与 JPEG 方向按设备旋转角实时计算；预览按真实比例居中裁满不变形；横屏时上下栏收窄、相册变 5 列；全景横屏切 40% 更宽、拼接统一高度并提升到 960px；抓拍判据放宽并加 60 秒兜底自动停。" "out/pp360-ble.apk"
+          echo "publish done" >> publish.log
+
+      - name: Upload publish log
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload latest publish.log --clobber
 
       - name: Upload build log on failure
         if: failure()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release view latest >/dev/null 2>&1 || gh release create latest --title "拍拍360 安卓版 APK" --notes "GitHub Actions 自动构建，debug 签名，安装时允许未知来源即可。"
           if [ -f build.log ]; then tail -c 200000 build.log > p360-build.log; else echo "no build.log captured" > p360-build.log; fi
           gh release upload latest p360-build.log --clobber
