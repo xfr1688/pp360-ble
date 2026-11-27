@@ -9,6 +9,7 @@
 - 单文件网页，无依赖、无构建、无服务器
 - 安卓 Chrome / 桌面 Chrome、Edge 直接打开即用
 - 每步 20°，18 步一整圈，设备到位会"叫一声"
+- **一键连续平滑旋转**（`0x06`），再点一次停止——不用像官方 App 那样一格一格拼
 - 附带 Python CLI，方便批量/脚本调用
 - 协议全文档化，方便二次开发（ESP32、树莓派等）
 
@@ -19,9 +20,10 @@
 ### 方式一：网页（推荐）
 
 1. 用**桌面 Chrome / Edge**，或**安卓 Chrome** 打开 `index.html`
+   （也可以直接访问 GitHub Pages，见仓库右侧 Environments）
 2. 云台短按电源键开机，指示灯亮起
 3. 点「连接云台」，在弹窗里选中 `TL-6C` 之类的设备
-4. 用「进一步 / 一圈 / 转到 90°」操作
+4. 用「进一步 / 一圈 / 连续旋转 / 转到 90°」操作
 
 > iOS 的 Safari 不支持 Web Bluetooth，iPhone 上用不了网页版，请改用 Python 或 Bluefy 这类浏览器。
 
@@ -36,10 +38,11 @@ python python/pp360_ctl.py scan      # ★ 标记的就是云台
 python python/pp360_ctl.py step 3    # 走 3 步 = 60°
 python python/pp360_ctl.py circle    # 整圈
 python python/pp360_ctl.py deg 90    # 转到 90°
-python python/pp360_ctl.py stop
+python python/pp360_ctl.py spin --secs 10   # 连续平滑旋转 10 秒（0x06）
+python python/pp360_ctl.py stop      # 停止（发 0x06 翻转）
 ```
 
-设备地址自动发现，也可以 `--addr` 指定。
+设备地址自动发现，也可以 `--addr FC:58:FA:xx:xx:xx` 指定。
 
 ---
 
@@ -80,21 +83,22 @@ python python/pp360_ctl.py stop
 |---|---|
 | 0 | 0x11 帧长 |
 | 5 | 命令 |
-| 6 | 档位（0 = 18 张 / 20°，1 = 36 张，2 = 72 张） |
-| 7 | 刷新：启动类填 1，停止/复位填 0 |
+| 6 | 档位（0 = 18 张 / 20°，1 = 36 张，2 = 72 张；**TL-6C 只认 0**） |
+| 7 | 刷新：启动类填 1，停止/复位填 0（**TL-6C 的 0x02 只认 1**） |
 
 | cmd | 含义 | TL-6C 实测 |
 |---|---|---|
-| `0x02` | **转一步** | ✅ 执行 + 回帧 + 蜂鸣 |
+| `0x02` | **转一步 20°** | ✅ 执行 + 回帧 + 蜂鸣；只接受 speed=0 / refresh=1 |
+| `0x06` | **连续旋转开关** | ✅ 每发一次翻转（开↔停），不回包，参数位被忽略 |
 | `0x01` | 拍照模式转 | ⚠️ 无动作、无回帧 |
 | `0x04` / `0x05` | 复位 | ⚠️ 无动作、无回帧 |
-| `0x0E` | 停止 | 写入有效，不回帧 |
+| `0x0E` | 停止 | ❌ **对本机无效**，停不住连续旋转 |
 | `0x0F` | 心跳/状态 | 无回帧 |
 
 ### 应答帧
 
 ```
-11 02 17 17 06 02 00 01 11 88 00 88 00 00 00 0D 0A
+11 02 NN 17 06 02 00 01 11 88 MM 88 00 00 00 0D 0A
 ```
 
 - byte1 = `0x02` 表示应答
@@ -107,6 +111,7 @@ python python/pp360_ctl.py stop
 2. **必须等应答再发下一帧**，否则新帧会被吞
 3. 写入用 Write Request（带响应）
 4. 18 步连发 = 精确一圈 360°
+5. 连续旋转（`0x06`）**没有回包**，也**不会自停**，想让停就再发一帧 `0x06`；`0x0E` 在这台固件上无效
 
 ---
 
@@ -115,7 +120,8 @@ python python/pp360_ctl.py stop
 1. 从失效的应用商店页拿到包名 `com.deepai.paipai`，经第三方镜像下载原厂签名 APK（签名 `O=deepai`，序列号与有效期均指向原厂）
 2. `baksmali` 反编译 42 个 dex，定位到唯一含 BLE 代码的 `classes43.dex`
 3. 读 `ble/MyBle.smali`、`ble/MyReadSend.smali`、`bledevice/DeviceMsg.smali`、`bledevice/GattAttributes.smali`，还原出 UUID、17 字节帧、命令表、应答解析、100ms 发送节流
-4. 用 `bleak` 在真机上逐条验证：确认服务 `1910`、确认 `0x02` 是单步、确认 18 步闭环、确认 `speed=1/2` 无效、确认 `0x01/0x04` 不执行
+4. 用 `bleak` 在真机上逐条验证：确认服务 `1910`、确认 `0x02` 是单步、确认 18 步闭环、确认 `speed=1/2` 无效、确认 `0x06` 是连续旋转开关、确认 `0x0E` 停不住
+5. 三批扫描排除反向指令：改静态头全部字节、改 `byte6/7` 全部取值、扫 `0x03/0x07–0x0D/0x10–0x17`，均无反转动
 
 详细记录见 [`PROTOCOL.md`](PROTOCOL.md)。
 
@@ -123,24 +129,20 @@ python python/pp360_ctl.py stop
 
 ## 已知限制
 
-- **只有 20° 一档**：`speed=1/2`（10°/5°）在这台固件上完全被忽略，15 秒内无动作无应答
-- **只能单向转**，回退一步 = 正向走 17 步（网页里已标出，约 16 秒）
-- **无法读取绝对位置**：设备不存储绝对角度，回帧里的序号只在本轮有效
+以下限制均已用实机测试逐条排除确认，不是"没找到指令"：
+
+- **只有 20° 一档**：`speed=1/2`（10°/5°）在这台固件上完全被忽略，15 秒内无动作无应答；改 `byte6/7` 会让 `0x02` 整帧被拒收
+- **不能反向**：扫过静态头全部字节（`b0–b4/b9/b10/b12`）、`byte6/7` 全部取值、命令号 `0x03/0x07–0x0D/0x10–0x17`，均无反向动作。回退一步 = 正向走 17 步（网页里已标出，约 16 秒），这也是官方 App 的做法
+- **`0x0E` 停不住连续旋转**：`0x06` 是翻转指令，停止必须再发一次 `0x06`
+- **无法读取绝对位置与旋转状态**：设备不存绝对角度；连续旋转期间不上报任何通知，机身实体按键也不上报
 - 闲置约 1 分钟后自动休眠，需短按电源键唤醒
 - 拍照本身走手机相机，不经过蓝牙；本项目只做转台控制
 
 ---
 
-## 发布到 GitHub
+## 发布到 GitHub Pages
 
-```bash
-git init && git add . && git commit -m "feat: pp360 BLE controller"
-git branch -M main
-git remote add origin https://github.com/<你的账号>/pp360-ble.git
-git push -u origin main
-```
-
-推上去后到仓库 **Settings → Pages → Source 选 GitHub Actions**，仓库自带的 `.github/workflows/pages.yml` 会自动把 `index.html` 发布成网页，手机扫码就能用。
+推到 GitHub 后到仓库 **Settings → Pages → Source 选 GitHub Actions**，仓库自带的 `.github/workflows/pages.yml` 会自动把 `index.html` 发布成网页，手机扫码就能用。
 
 ---
 
