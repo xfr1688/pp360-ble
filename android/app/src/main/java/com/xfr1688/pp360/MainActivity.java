@@ -1,23 +1,6 @@
 package com.xfr1688.pp360;
 
-import android.Manifest;
 import android.app.Activity;
-import android.app.AlertDialog;
-import android.bluetooth.BluetoothAdapter;
-import android.bluetooth.BluetoothDevice;
-import android.bluetooth.BluetoothGatt;
-import android.bluetooth.BluetoothGattCallback;
-import android.bluetooth.BluetoothGattCharacteristic;
-import android.bluetooth.BluetoothGattDescriptor;
-import android.bluetooth.BluetoothGattService;
-import android.bluetooth.BluetoothManager;
-import android.bluetooth.BluetoothProfile;
-import android.bluetooth.le.BluetoothLeScanner;
-import android.bluetooth.le.ScanCallback;
-import android.bluetooth.le.ScanResult;
-import android.bluetooth.le.ScanSettings;
-import android.content.Context;
-import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
@@ -38,42 +21,23 @@ import android.widget.Toast;
 
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
-import java.util.Collections;
-import java.util.Comparator;
 import java.util.Date;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
-import java.util.UUID;
 
 /**
- * 拍拍360（TL-6C）BLE 直连控制器。
+ * 拍拍360（TL-6C）BLE 控制器主界面。
  *
  * 协议（静态逆向 com.deepai.paipai，实机验证）：
- *   17 字节帧，写 fff1，通知 fff4，无校验无加密。
- *   11 01 55 01 02 [cmd] [speed] [refresh] 11 88 88 88 00 00 00 0D 0A
  *   cmd 0x02 + speed=0 + refresh=1  → 前进 20°，约 0.9s 到位（唯一可用步进）
- *   cmd 0x06                        → 连续旋转开关（每发一次翻转状态，不回包）
+ *   cmd 0x06                        → 连续旋转开关（发一次翻转一次，不回包）
  *   反向指令不存在，只能走 17 步绕圈（340°）
  */
 public class MainActivity extends Activity {
 
-    /* ---------------- 协议常量 ---------------- */
-    private static final UUID SVC_UUID  = UUID.fromString("00001910-0000-1000-8000-00805f9b34fb");
-    private static final UUID W_UUID    = UUID.fromString("0000fff1-0000-1000-8000-00805f9b34fb");
-    private static final UUID N_UUID    = UUID.fromString("0000fff4-0000-1000-8000-00805f9b34fb");
-    private static final UUID CCCD_UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb");
-
-    private static final int STEP_DEG = 20;    // 每步 20°
-    private static final int RING     = 18;    // 一圈 18 步
-    private static final int CMD_STEP = 0x02;  // 前进一格
-    private static final int CMD_SPIN = 0x06;  // 连续旋转开关
-
-    private static final byte[] BASE = new byte[]{
-            0x11, 0x01, 0x55, 0x01, 0x02, 0x00, 0x00, 0x00, 0x11,
-            (byte) 0x88, (byte) 0x88, (byte) 0x88, 0x00, 0x00, 0x00, 0x0D, 0x0A
-    };
+    private static final int STEP_DEG = 20;   // 每步 20°
+    private static final int RING     = 18;   // 一圈 18 步
+    private static final int STEP_MS  = 1000; // 每步间隔（实机 0.9s 到位）
 
     /* ---------------- 配色 ---------------- */
     private static final int C_BG     = 0xFF0B0B0D;
@@ -88,17 +52,8 @@ public class MainActivity extends Activity {
 
     /* ---------------- 状态 ---------------- */
     private final Handler ui = new Handler(Looper.getMainLooper());
+    private BleLink ble;
 
-    private BluetoothAdapter mAdapter;
-    private BluetoothLeScanner mScanner;
-    private BluetoothGatt mGatt;
-    private BluetoothGattCharacteristic chW, chN;
-    private BluetoothDevice mDevice;
-
-    private final Map<String, BluetoothDevice> found = new HashMap<>();
-    private final Map<String, String> names = new HashMap<>();
-
-    private boolean scanning = false;
     private boolean busy = false;
     private boolean spin = false;
     private int pos = 0, laps = 0, sent = 0;
@@ -123,9 +78,8 @@ public class MainActivity extends Activity {
         } catch (Exception ignored) {
         }
 
-        BluetoothManager bm = (BluetoothManager) getSystemService(Context.BLUETOOTH_SERVICE);
-        mAdapter = (bm == null) ? null : bm.getAdapter();
-        if (mAdapter == null) {
+        ble = new BleLink(this, bleCb);
+        if (!ble.isSupported()) {
             setStatus("此设备没有蓝牙");
             btnConnect.setEnabled(false);
         } else {
@@ -135,22 +89,79 @@ public class MainActivity extends Activity {
         paintSpin();
         refreshBtns();
         log("帧：17 字节 · 写 fff1 · 命令位 = 第 6 字节");
+        log("协议来自 com.deepai.paipai v2.2.6 静态逆向");
     }
 
     @Override
     protected void onDestroy() {
         try {
-            if (mGatt != null) {
-                mGatt.disconnect();
-                mGatt.close();
+            if (ble != null) {
+                ble.disconnect();
             }
         } catch (Exception ignored) {
         }
-        mGatt = null;
-        chW = null;
-        chN = null;
         super.onDestroy();
     }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (ble != null) {
+            ble.onPermissionResult(requestCode, grantResults);
+        }
+    }
+
+    /* ---------------- 链路回调 ---------------- */
+    private final BleLink.Callback bleCb = new BleLink.Callback() {
+        @Override
+        public void onLog(String msg) {
+            log(msg);
+        }
+
+        @Override
+        public void onState(String state) {
+            setStatus(state);
+        }
+
+        @Override
+        public void onConnected(final String name) {
+            ui.post(new Runnable() {
+                @Override
+                public void run() {
+                    btnConnect.setText("已连接");
+                    setStatus("已连接 " + name);
+                    refreshBtns();
+                    toast("连上了：" + name);
+                }
+            });
+        }
+
+        @Override
+        public void onNotify(byte[] value) {
+            final String h = BleLink.hexOf(value);
+            ui.post(new Runnable() {
+                @Override
+                public void run() {
+                    log("← " + h);
+                }
+            });
+        }
+
+        @Override
+        public void onDisconnected() {
+            ui.post(new Runnable() {
+                @Override
+                public void run() {
+                    spin = false;
+                    busy = false;
+                    btnConnect.setText("连接云台");
+                    setStatus("未连接");
+                    paintSpin();
+                    refreshBtns();
+                }
+            });
+        }
+    };
 
     /* ====================== UI 构建 ====================== */
 
@@ -242,7 +253,6 @@ public class MainActivity extends Activity {
         tvMeta.setGravity(Gravity.CENTER);
         addTop(root, tvMeta, 2);
 
-        /* 行：回退 / 进一步 */
         LinearLayout r1 = row();
         btnBack = mkBtn("◀ 回退 17 步", false);
         btnStep = mkBtn("进一步 20° ▶", true);
@@ -250,7 +260,6 @@ public class MainActivity extends Activity {
         addCell(r1, btnStep, 1f);
         addTop(root, r1, 16);
 
-        /* 行：预设角度 */
         LinearLayout r2 = row();
         btn90 = mkBtn("90°", false);
         btn180 = mkBtn("180°", false);
@@ -262,7 +271,6 @@ public class MainActivity extends Activity {
         addCell(r2, btnStop, 1f);
         addTop(root, r2, 8);
 
-        /* 行：连续旋转 */
         LinearLayout r3 = row();
         btnSpin = mkBtn("◉ 连续旋转", true);
         btnSpinStop = mkBtn("■ 停", false);
@@ -270,7 +278,6 @@ public class MainActivity extends Activity {
         addCell(r3, btnSpinStop, 0.8f);
         addTop(root, r3, 8);
 
-        /* 行：自定义角度 */
         LinearLayout r4 = row();
         etDeg = new EditText(this);
         etDeg.setHint("角度，如 45");
@@ -285,7 +292,6 @@ public class MainActivity extends Activity {
         addCell(r4, btnGo, 0.8f);
         addTop(root, r4, 8);
 
-        /* 行：连接 */
         LinearLayout r5 = row();
         btnConnect = mkBtn("连接云台", true);
         btnDisc = mkBtn("断开", false);
@@ -311,3 +317,280 @@ public class MainActivity extends Activity {
         foot.setGravity(Gravity.CENTER);
         addTop(root, foot, 18);
     }
+
+    /* ====================== 交互 ====================== */
+
+    private void bindEvents() {
+        btnStep.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                doSteps(1, "进一步");
+            }
+        });
+        btnBack.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                doSteps(RING - 1, "回退一步");
+            }
+        });
+        btn90.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                goDeg(90, "转到 90°");
+            }
+        });
+        btn180.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                goDeg(180, "转到 180°");
+            }
+        });
+        btn360.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                doSteps(RING, "转一圈");
+            }
+        });
+        btnStop.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                stopSpin();
+            }
+        });
+        btnSpin.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                toggleSpin();
+            }
+        });
+        btnSpinStop.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                stopSpin();
+            }
+        });
+        btnConnect.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                if (ble != null && ble.isConnected()) {
+                    toast("已经连着了，先断开再换设备");
+                    return;
+                }
+                btnConnect.setText("扫描中…");
+                ble.scan();
+            }
+        });
+        btnDisc.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                if (ble != null) {
+                    ble.disconnect();
+                    toast("已断开");
+                }
+            }
+        });
+        btnGo.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                String s = etDeg.getText().toString().trim();
+                if (s.isEmpty()) {
+                    toast("先输入角度");
+                    return;
+                }
+                int d;
+                try {
+                    d = Integer.parseInt(s);
+                } catch (Exception e) {
+                    toast("角度得是数字");
+                    return;
+                }
+                if (d < 0 || d > 360) {
+                    toast("输入 0–360 之间");
+                    return;
+                }
+                goDeg(d, "转到 " + d + "°");
+            }
+        });
+    }
+
+    /* ====================== 步进 ====================== */
+
+    private void doSteps(final int n, final String label) {
+        if (ble == null || !ble.isConnected()) {
+            toast("还没连上云台");
+            return;
+        }
+        if (busy) {
+            toast("正在执行，稍等");
+            return;
+        }
+        if (n <= 0) {
+            toast("已经在目标角度");
+            return;
+        }
+        busy = true;
+        refreshBtns();
+
+        if (spin) {
+            ble.toggleSpin();
+            spin = false;
+            log("先停掉连续旋转");
+            paintSpin();
+        }
+
+        log("→ " + label + "：" + n + " 步（" + (n * STEP_DEG) + "°），约 " + n + " 秒");
+
+        final int total = n;
+        final int[] done = {0};
+        ui.post(new Runnable() {
+            @Override
+            public void run() {
+                if (done[0] >= total) {
+                    busy = false;
+                    refreshBtns();
+                    log("=== " + label + " 完成：" + total + " 步 ===");
+                    return;
+                }
+                if (!ble.step()) {
+                    busy = false;
+                    refreshBtns();
+                    log("写入失败，中断（连接可能掉了）");
+                    toast("发送失败，检查连接");
+                    return;
+                }
+                done[0]++;
+                sent++;
+                pos = (pos + 1) % RING;
+                if (pos == 0) {
+                    laps++;
+                }
+                render();
+                ui.postDelayed(this, STEP_MS);
+            }
+        });
+    }
+
+    private int stepsTo(int deg) {
+        int target = ((Math.round(deg / (float) STEP_DEG)) % RING + RING) % RING;
+        return (target - pos + RING) % RING;
+    }
+
+    private void goDeg(int deg, String label) {
+        int n = stepsTo(deg);
+        if (n == 0) {
+            toast("已在目标角度");
+            return;
+        }
+        doSteps(n, label);
+    }
+
+    /* ====================== 连续旋转 ====================== */
+
+    private void toggleSpin() {
+        if (ble == null || !ble.isConnected()) {
+            toast("还没连上云台");
+            return;
+        }
+        if (busy) {
+            toast("正在步进，稍等再开");
+            return;
+        }
+        if (!ble.toggleSpin()) {
+            toast("发送失败");
+            return;
+        }
+        spin = !spin;
+        log(spin ? "→ 0x06 启动连续旋转（不回包，不自停）" : "→ 0x06 停止连续旋转");
+        toast(spin ? "正在连续旋转，再点一次停" : "已停");
+        paintSpin();
+    }
+
+    private void stopSpin() {
+        if (ble == null || !ble.isConnected()) {
+            toast("还没连上");
+            return;
+        }
+        if (busy) {
+            toast("正在步进");
+            return;
+        }
+        if (!spin) {
+            toast("当前已是停止状态（0x0E 在本机无效，只能 0x06 翻转）");
+            return;
+        }
+        ble.toggleSpin();
+        spin = false;
+        log("→ 0x06 停止（0x0E 对本机无效）");
+        toast("已发送停止");
+        paintSpin();
+    }
+
+    /* ====================== 界面刷新 ====================== */
+
+    private void render() {
+        if (tvAngle == null) {
+            return;
+        }
+        tvAngle.setText((pos * STEP_DEG) + "°");
+        tvMeta.setText(pos + " / " + RING + " 步 · 已转 " + laps + " 圈 · 已发 " + sent + " 帧");
+    }
+
+    private void paintSpin() {
+        if (btnSpin == null) {
+            return;
+        }
+        btnSpin.setText(spin ? "■ 停止旋转" : "◉ 连续旋转");
+        btnStop.setEnabled(!busy && spin);
+        btnSpinStop.setEnabled(!busy && spin);
+        setStatus(spin ? "连续旋转中…"
+                : (ble != null && ble.isConnected() ? ("已连接 " + ble.deviceName()) : "未连接"));
+    }
+
+    private void refreshBtns() {
+        if (btnStep == null) {
+            return;
+        }
+        btnStep.setEnabled(!busy);
+        btnBack.setEnabled(!busy);
+        btn90.setEnabled(!busy);
+        btn180.setEnabled(!busy);
+        btn360.setEnabled(!busy);
+        btnGo.setEnabled(!busy);
+        btnSpin.setEnabled(!busy);
+        btnStop.setEnabled(!busy && spin);
+        btnSpinStop.setEnabled(!busy && spin);
+    }
+
+    private void setStatus(String s) {
+        if (tvStatus == null) {
+            return;
+        }
+        tvStatus.setText("●  " + s);
+        if (s.contains("失败") || s.contains("没") || s.contains("断开")) {
+            tvStatus.setTextColor(C_ERR);
+        } else if (s.contains("中") || s.contains("旋转")) {
+            tvStatus.setTextColor(C_GOLD);
+        } else {
+            tvStatus.setTextColor(C_DIM);
+        }
+    }
+
+    private void log(String m) {
+        String t = new SimpleDateFormat("HH:mm:ss", Locale.CHINA).format(new Date());
+        lines.add("[" + t + "] " + m);
+        while (lines.size() > 80) {
+            lines.remove(0);
+        }
+        if (tvLog != null) {
+            StringBuilder sb = new StringBuilder();
+            for (String s : lines) {
+                sb.append(s).append('\n');
+            }
+            tvLog.setText(sb.toString());
+        }
+    }
+
+    private void toast(String s) {
+        Toast.makeText(this, s, Toast.LENGTH_SHORT).show();
+    }
+}
