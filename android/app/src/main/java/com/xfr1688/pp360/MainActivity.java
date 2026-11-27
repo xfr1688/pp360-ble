@@ -28,16 +28,20 @@ import java.util.List;
 import java.util.Locale;
 
 /**
- * PP360 云台控制器 —— v0.2 界面。
+ * PP360 云台控制器 —— v0.3 界面。
  *
- * 结构：底部三个入口（云台 / 拍摄 / 设置），控制台收进「开发者选项」。
- * 首页是产品透视图 + 角度读数 + 主操作，扫描结果直接列在页内，优先识别 TL- 设备。
+ * 底部三个入口（云台 / 拍摄 / 设置），拍摄页是独立 Activity（全屏取景），
+ * 控制台收进「开发者选项」。拍摄页通过本类的静态桥发云台命令，保证单 BLE 连接。
  */
 public class MainActivity extends Activity {
 
     private static final int STEP_DEG = 20;
     private static final int RING = 18;
     private static final int STEP_MS = 1000;
+
+    /** 供 ShootActivity 拿云台控制权的弱引用桥 */
+    private static java.lang.ref.WeakReference<MainActivity> INSTANCE =
+            new java.lang.ref.WeakReference<MainActivity>(null);
 
     /* ---------------- 配色：深空黑 + 香槟金 + 冷蓝 ---------------- */
     private static final int C_BG     = 0xFF05060A;
@@ -93,6 +97,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        INSTANCE = new java.lang.ref.WeakReference<MainActivity>(this);
         buildUi();
         bindEvents();
         try {
@@ -103,7 +108,7 @@ public class MainActivity extends Activity {
         render();
         setPill("未连接", C_DIM);
         refreshBtns();
-        log("PP360 v0.2 启动");
+        log("PP360 v0.3 启动");
 
         if (!ble.isSupported()) {
             setPill("不支持蓝牙", C_RED);
@@ -122,6 +127,9 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        if (INSTANCE.get() == this) {
+            INSTANCE = new java.lang.ref.WeakReference<MainActivity>(null);
+        }
         try {
             if (ble != null) {
                 ble.disconnect();
@@ -136,6 +144,42 @@ public class MainActivity extends Activity {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         if (ble != null) {
             ble.onPermissionResult(requestCode, grantResults);
+        }
+    }
+
+    /* ---------------- 给拍摄页用的静态桥 ---------------- */
+
+    static boolean bleReady() {
+        MainActivity m = INSTANCE.get();
+        return m != null && m.ble != null && m.ble.isConnected();
+    }
+
+    static void shootStep() {
+        MainActivity m = INSTANCE.get();
+        if (m != null) {
+            m.stepOneForShot();
+        }
+    }
+
+    static void shootSpin(boolean on) {
+        MainActivity m = INSTANCE.get();
+        if (m != null && m.ble != null && m.ble.isConnected() && m.spin != on) {
+            m.toggleSpin();
+        }
+    }
+
+    /** 拍摄用的一步：直接发帧，不受 busy 限制，但同步主页角度 */
+    private void stepOneForShot() {
+        if (ble == null || !ble.isConnected()) {
+            return;
+        }
+        if (ble.step()) {
+            sent++;
+            pos = (pos + 1) % RING;
+            if (pos == 0) {
+                laps++;
+            }
+            render();
         }
     }
 
@@ -338,57 +382,64 @@ public class MainActivity extends Activity {
         return lastScroll;
     }
 
+    /** 拍摄分页：单独 Activity 全屏取景，这里只放入口与说明 */
     private View buildShot() {
         LinearLayout col = newPage();
 
         addTop(col, tv("拍摄", 24, C_TEXT, true), 0);
-        addTop(col, tv("把云台变成一台会跟人的相机", 12, C_DIM, false), 4);
+        addTop(col, tv("云台相机 · 单拍 / 定时 / 全景 / 人脸抓拍", 12, C_DIM, false), 4);
 
-        LinearLayout frame = new LinearLayout(this);
-        frame.setOrientation(LinearLayout.VERTICAL);
-        frame.setGravity(Gravity.CENTER);
-        frame.setBackground(round(C_CARD_2, C_LINE, 22, 1));
-        frame.setPadding(dp(16), dp(56), dp(16), dp(56));
-        TextView lens = tv("◎", 44, 0x33FFFFFF, false);
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setGravity(Gravity.CENTER);
+        card.setBackground(round(C_CARD_2, C_LINE, 22, 1));
+        card.setPadding(dp(18), dp(40), dp(18), dp(40));
+        TextView lens = tv("◎", 46, 0x33FFFFFF, false);
         lens.setGravity(Gravity.CENTER);
-        frame.addView(lens);
-        TextView t1 = tv("相机接入在下一版", 14, C_TEXT, true);
+        card.addView(lens);
+        TextView t1 = tv("打开相机取景", 16, C_TEXT, true);
         t1.setGravity(Gravity.CENTER);
-        addTop(frame, t1, 10);
-        TextView t2 = tv("需要相机权限与人脸/人体跟踪，先做 UI 骨架", 11, C_DIM, false);
+        addTop(card, t1, 12);
+        TextView t2 = tv("全屏预览，拍完自动存本机", 11, C_DIM, false);
         t2.setGravity(Gravity.CENTER);
-        addTop(frame, t2, 4);
-        addTop(col, frame, 18);
+        addTop(card, t2, 5);
+        addTop(col, card, 18);
+        card.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                openShoot();
+            }
+        });
 
         String[][] modes = {
-                {"跟随", "锁定主体，转台持续追焦", "规划中"},
-                {"定时", "每 N 秒转一格拍一张", "规划中"},
-                {"全景", "18 张拼一张 360°", "规划中"}
+                {"拍照", "手动快门，云台不动"},
+                {"定时", "每张后云台正转一格，适合自拍串"},
+                {"全景", "正转一圈 18 格 18 张"},
+                {"抓拍", "巡转扫到人脸，入框即停并拍"}
         };
         for (int i = 0; i < modes.length; i++) {
-            LinearLayout cardRow = row();
-            LinearLayout texts = new LinearLayout(this);
-            texts.setOrientation(LinearLayout.VERTICAL);
-            texts.addView(tv(modes[i][0], 15, C_TEXT, true));
-            texts.addView(tv(modes[i][1], 11, C_DIM, false));
-            LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(
-                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-            texts.setLayoutParams(tlp);
-            cardRow.addView(texts);
-            TextView st = tv(modes[i][2], 11, 0xFF6A7078, false);
-            st.setPadding(dp(10), dp(5), dp(10), dp(5));
-            st.setBackground(round(0x0CFFFFFF, C_LINE, 12, 1));
-            cardRow.addView(st);
-            cardRow.setBackground(round(C_CARD, C_LINE, 18, 1));
+            LinearLayout r = new LinearLayout(this);
+            r.setOrientation(LinearLayout.VERTICAL);
+            r.setBackground(round(C_CARD, C_LINE, 18, 1));
             int p = dp(16);
-            cardRow.setPadding(p, dp(16), p, dp(16));
-            addTop(col, cardRow, 10);
+            r.setPadding(p, dp(14), p, dp(14));
+            r.addView(tv(modes[i][0], 14, C_TEXT, true));
+            r.addView(tv(modes[i][1], 11, C_DIM, false));
+            addTop(col, r, 10);
         }
 
-        addTop(col, tv("说明：跟踪需要实时读相机帧做目标检测，会显著吃电；后续版本做成可选开关，默认只用固定角度定时拍摄。",
+        addTop(col, tv("说明：抓拍依赖本机摄像头的人脸检测能力，部分机型不支持；不支持时会直接提示。远景人脸小，命中距离有限，室内 2–4 米最稳。",
                 11, 0xFF6A7078, false), 18);
 
         return lastScroll;
+    }
+
+    private void openShoot() {
+        try {
+            startActivity(new android.content.Intent(this, ShootActivity.class));
+        } catch (Exception e) {
+            toast("打不开拍摄页：" + e.getClass().getSimpleName());
+        }
     }
 
     private View buildSettings() {
@@ -445,6 +496,12 @@ public class MainActivity extends Activity {
         devTexts.setLayoutParams(dlp);
         devEntry.addView(devTexts);
         devEntry.addView(tv("›", 22, C_DIM, false));
+        devEntry.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                showPage(3);
+            }
+        });
         addTop(col, devEntry, 12);
 
         LinearLayout about = new LinearLayout(this);
@@ -452,8 +509,9 @@ public class MainActivity extends Activity {
         about.setBackground(round(C_CARD, C_LINE, 18, 1));
         about.setPadding(p, dp(16), p, dp(16));
         about.addView(tv("关于", 11, C_DIM, false));
-        addTop(about, tv("PP360 v0.2", 14, C_TEXT, true), 6);
+        addTop(about, tv("PP360 v0.3", 14, C_TEXT, true), 6);
         addTop(about, tv("协议来自 com.deepai.paipai v2.2.6 静态逆向 · 未使用第三方代码", 11, C_DIM, false), 4);
+        addTop(about, tv("照片目录：Android/data/com.xfr1688.pp360/files/shots", 11, C_DIM, false), 4);
         addTop(about, tv("开源：github.com/xfr1688/pp360-ble", 11, 0xFF6A7078, false), 4);
         addTop(col, about, 12);
 
@@ -622,12 +680,6 @@ public class MainActivity extends Activity {
                     devList.addView(deviceRow(unnamed.get(i), true));
                 }
                 tvOther.setVisibility(View.GONE);
-            }
-        });
-        devEntry.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                showPage(3);
             }
         });
         swAuto.setOnCheckedChangeListener(new android.widget.CompoundButton.OnCheckedChangeListener() {
