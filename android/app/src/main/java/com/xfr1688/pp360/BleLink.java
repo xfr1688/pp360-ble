@@ -2,7 +2,6 @@ package com.xfr1688.pp360;
 
 import android.Manifest;
 import android.app.Activity;
-import android.app.AlertDialog;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothGatt;
@@ -17,25 +16,26 @@ import android.bluetooth.le.ScanCallback;
 import android.bluetooth.le.ScanResult;
 import android.bluetooth.le.ScanSettings;
 import android.content.Context;
-import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
-import android.widget.Toast;
 
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 
 /**
  * 拍拍360（TL-6C）BLE 链路层。
- * 只负责：扫设备、建链路、发 17 字节帧。所有回调已统一切到主线程。
+ *
+ * 只负责三件事：扫设备（结果以列表回调给界面）、建链路、发 17 字节帧。
+ * 所有回调都统一切到主线程，界面层不用自己 post。
  */
 public class BleLink {
 
@@ -54,9 +54,36 @@ public class BleLink {
             (byte) 0x88, (byte) 0x88, (byte) 0x88, 0x00, 0x00, 0x00, 0x0D, 0x0A
     };
 
+    /* ---------------- 扫描结果 ---------------- */
+    public static class Dev {
+        public final String address;
+        public final String name;
+        public final int rssi;
+
+        public Dev(String address, String name, int rssi) {
+            this.address = address;
+            this.name = name;
+            this.rssi = rssi;
+        }
+
+        public boolean isTl() {
+            return name != null && name.toUpperCase(Locale.US).startsWith("TL");
+        }
+
+        public String label() {
+            return (name == null || name.trim().isEmpty()) ? "未命名设备" : name.trim();
+        }
+
+        public String mac() {
+            return address == null ? "" : address.toUpperCase(Locale.US);
+        }
+    }
+
     public interface Callback {
         void onLog(String msg);
         void onState(String state);
+        void onScanFound(Dev dev);
+        void onScanFinished(List<Dev> devices);
         void onConnected(String name);
         void onNotify(byte[] value);
         void onDisconnected();
@@ -72,9 +99,9 @@ public class BleLink {
     private BluetoothGattCharacteristic chW, chN;
     private BluetoothDevice mDevice;
 
-    private final Map<String, BluetoothDevice> found = new HashMap<>();
-    private final Map<String, String> names = new HashMap<>();
+    private final Map<String, Dev> found = new HashMap<>();
     private boolean scanning = false;
+    private int mRssi = 0;
 
     public BleLink(Activity a, Callback callback) {
         this.activity = a;
@@ -98,6 +125,24 @@ public class BleLink {
             @Override
             public void run() {
                 cb.onState(s);
+            }
+        });
+    }
+
+    private void pFound(final Dev d) {
+        ui.post(new Runnable() {
+            @Override
+            public void run() {
+                cb.onScanFound(d);
+            }
+        });
+    }
+
+    private void pFinished(final List<Dev> list) {
+        ui.post(new Runnable() {
+            @Override
+            public void run() {
+                cb.onScanFinished(list);
             }
         });
     }
@@ -129,15 +174,6 @@ public class BleLink {
         });
     }
 
-    private void pToast(final String m) {
-        ui.post(new Runnable() {
-            @Override
-            public void run() {
-                Toast.makeText(activity, m, Toast.LENGTH_SHORT).show();
-            }
-        });
-    }
-
     public boolean isSupported() {
         return mAdapter != null;
     }
@@ -150,26 +186,38 @@ public class BleLink {
         return safeName(mDevice);
     }
 
-    /* ---------------- 诊断 ---------------- */
-    private String diag() {
-        StringBuilder sb = new StringBuilder();
-        sb.append("诊断 SDK ").append(Build.VERSION.SDK_INT);
-        sb.append(" · 蓝牙 ").append((mAdapter != null && mAdapter.isEnabled()) ? "开" : "关");
+    public String deviceMac() {
         try {
-            sb.append(" · 已配对 ").append(mAdapter.getBondedDevices().size()).append(" 个");
+            return mDevice == null ? "" : mDevice.getAddress().toUpperCase(Locale.US);
         } catch (Exception e) {
-            sb.append(" · 已配对读不到(无 CONNECT 权限)");
+            return "";
+        }
+    }
+
+    public int deviceRssi() {
+        return mRssi;
+    }
+
+    /* ---------------- 诊断 ---------------- */
+    public String diag() {
+        StringBuilder sb = new StringBuilder();
+        sb.append("SDK ").append(Build.VERSION.SDK_INT);
+        sb.append(" · 蓝牙").append((mAdapter != null && mAdapter.isEnabled()) ? "开" : "关");
+        try {
+            sb.append(" · 已配对 ").append(mAdapter.getBondedDevices().size()).append(" 台");
+        } catch (Exception e) {
+            sb.append(" · 已配对读不到");
         }
         try {
             boolean loc = activity.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)
                     == PackageManager.PERMISSION_GRANTED;
-            sb.append(" · 位置权限 ").append(loc ? "有" : "无");
+            sb.append(" · 位置权限").append(loc ? "有" : "无");
         } catch (Exception ignored) {
         }
         try {
             boolean scan = activity.checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN)
                     == PackageManager.PERMISSION_GRANTED;
-            sb.append(" · 扫描权限 ").append(scan ? "有" : "无");
+            sb.append(" · 扫描权限").append(scan ? "有" : "无");
         } catch (Exception ignored) {
         }
         return sb.toString();
@@ -182,8 +230,7 @@ public class BleLink {
             return;
         }
         if (!mAdapter.isEnabled()) {
-            pLog("蓝牙没开，先打开蓝牙");
-            pToast("先打开手机蓝牙");
+            pLog("蓝牙未开启");
             try {
                 activity.startActivity(new Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE));
             } catch (Exception ignored) {
@@ -223,9 +270,8 @@ public class BleLink {
         if (all) {
             startScan();
         } else {
-            pLog("权限被拒绝，扫不了。请到系统设置 → 应用 → 拍拍360 里手动打开『附近设备』");
-            pToast("权限被拒，去设置里手动开");
-            pState("未连接");
+            pLog("权限被拒绝：去 设置 → 应用 → 拍拍360 打开『附近设备』");
+            pState("权限未授予");
         }
     }
 
@@ -240,11 +286,9 @@ public class BleLink {
             return;
         }
         found.clear();
-        names.clear();
         scanning = true;
-        pState("扫描中…先按云台电源键");
-        pLog("开始扫描 BLE 设备，共 " + (SCAN_MS / 1000) + " 秒");
-        pLog(diag());
+        pState("搜索中");
+        pLog("开始扫描 " + (SCAN_MS / 1000) + " 秒 · " + diag());
         ScanSettings st = new ScanSettings.Builder()
                 .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
                 .build();
@@ -259,9 +303,14 @@ public class BleLink {
         ui.postDelayed(new Runnable() {
             @Override
             public void run() {
-                stopAndPick();
+                finishScan();
             }
         }, SCAN_MS);
+    }
+
+    /** 提前结束扫描（切页面、用户点选设备时） */
+    public void stopScan() {
+        finishScan();
     }
 
     private final ScanCallback scanCb = new ScanCallback() {
@@ -269,7 +318,7 @@ public class BleLink {
         public void onScanResult(int type, ScanResult result) {
             BluetoothDevice d = result.getDevice();
             String addr = d.getAddress();
-            if (found.containsKey(addr)) {
+            if (addr == null || found.containsKey(addr)) {
                 return;
             }
             String nm = null;
@@ -280,21 +329,20 @@ public class BleLink {
             if (nm == null && result.getScanRecord() != null) {
                 nm = result.getScanRecord().getDeviceName();
             }
-            found.put(addr, d);
-            names.put(addr, nm);
-            pLog("发现 " + (nm == null || nm.isEmpty() ? "(无名)" : nm)
-                    + "  " + addr + "  RSSI " + result.getRssi());
+            Dev dev = new Dev(addr, nm, result.getRssi());
+            found.put(addr, dev);
+            pFound(dev);
         }
 
         @Override
-        public void onScanFailed(int errorCode) {
+        public void onScanFailed(int code) {
             scanning = false;
-            pLog("扫描失败 errorCode=" + errorCode + "（1=太频繁，2=无法开始，3=内部错误，4=被系统限制）");
-            pState("未连接");
+            pLog("扫描失败 code=" + code + "（1 太频繁 / 2 无法开始 / 3 内部错误 / 4 被系统限制）");
+            pFinished(new ArrayList<Dev>());
         }
     };
 
-    private void stopAndPick() {
+    private void finishScan() {
         if (!scanning) {
             return;
         }
@@ -305,59 +353,38 @@ public class BleLink {
             }
         } catch (Exception ignored) {
         }
-
-        if (found.isEmpty()) {
-            pLog("扫描结束：0 个设备");
-            pLog(diag());
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                pLog("Android 12+：确认已允许『附近设备』（含扫描/连接）；小米、华为等机型还要求把『定位服务』总开关打开");
-            } else {
-                pLog("Android 11 及以下：扫 BLE 必须打开『定位服务』总开关并允许位置权限");
-            }
-            pLog("云台闲置约 1 分钟就停广播：短按电源键让灯亮，趁亮着再点连接");
-            pState("未连接");
-            pToast("没扫到：先按电源键亮灯，并检查定位开关");
-            return;
-        }
-
-        final List<BluetoothDevice> devs = new ArrayList<>(found.values());
-        Collections.sort(devs, new Comparator<BluetoothDevice>() {
+        List<Dev> list = new ArrayList<>(found.values());
+        Collections.sort(list, new Comparator<Dev>() {
             @Override
-            public int compare(BluetoothDevice a, BluetoothDevice b) {
-                String na = names.get(a.getAddress());
-                String nb = names.get(b.getAddress());
-                int pa = (na != null && na.startsWith("TL")) ? 0 : 1;
-                int pb = (nb != null && nb.startsWith("TL")) ? 0 : 1;
-                return pa - pb;
+            public int compare(Dev a, Dev b) {
+                if (a.isTl() != b.isTl()) {
+                    return a.isTl() ? -1 : 1;
+                }
+                return b.rssi - a.rssi;
             }
         });
-
-        String[] items = new String[devs.size()];
-        for (int i = 0; i < devs.size(); i++) {
-            BluetoothDevice d = devs.get(i);
-            String n = names.get(d.getAddress());
-            items[i] = (n == null || n.isEmpty() ? "(无名)" : n) + "   " + d.getAddress();
-        }
-
-        pLog("扫描到 " + devs.size() + " 个设备");
-        new AlertDialog.Builder(activity)
-                .setTitle("选择云台")
-                .setItems(items, new DialogInterface.OnClickListener() {
-                    @Override
-                    public void onClick(DialogInterface dialog, int which) {
-                        connectTo(devs.get(which));
-                    }
-                })
-                .setNegativeButton("取消", null)
-                .show();
+        pLog("扫描结束：" + list.size() + " 个设备");
+        pFinished(list);
     }
 
     /* ---------------- 建链路 ---------------- */
+    public void connect(String address) {
+        BluetoothDevice d;
+        try {
+            d = mAdapter.getRemoteDevice(address);
+        } catch (Exception e) {
+            pLog("地址无效：" + address);
+            return;
+        }
+        connectTo(d);
+    }
+
     private void connectTo(BluetoothDevice d) {
         closeGatt();
         mDevice = d;
-        pState("连接中…");
-        pLog("连接 " + safeName(d) + "  " + d.getAddress());
+        mRssi = 0;
+        pState("连接中");
+        pLog("连接 " + safeName(d) + "  " + safeAddress(d));
         try {
             mGatt = d.connectGatt(activity, false, gattCb, BluetoothDevice.TRANSPORT_LE);
         } catch (Exception e) {
@@ -370,8 +397,8 @@ public class BleLink {
         @Override
         public void onConnectionStateChange(BluetoothGatt g, int status, int newState) {
             if (newState == BluetoothProfile.STATE_CONNECTED) {
-                pState("已连接，发现服务…");
-                pLog("链路已建立，开始发现服务");
+                pState("发现服务");
+                pLog("链路已建立，发现服务…");
                 try {
                     g.discoverServices();
                 } catch (Exception e) {
@@ -415,8 +442,8 @@ public class BleLink {
             }
 
             if (w == null) {
-                pLog("没找到 fff1（status=" + status + "），可能不是 TL-6C");
-                pState("连接失败：无 fff1");
+                pLog("没找到 fff1（status=" + status + "），不是 TL-6C 或固件不同");
+                pState("连接失败");
                 try {
                     g.close();
                 } catch (Exception ignored) {
@@ -507,7 +534,7 @@ public class BleLink {
 
     public void disconnect() {
         closeGatt();
-        pLog("已主动断开，BLE 链路已释放");
+        pLog("已断开");
         pDisconnected();
     }
 
@@ -530,9 +557,17 @@ public class BleLink {
         }
         try {
             String n = d.getName();
-            return (n == null || n.isEmpty()) ? "设备" : n;
+            return (n == null || n.trim().isEmpty()) ? "设备" : n.trim();
         } catch (Exception e) {
             return "设备";
+        }
+    }
+
+    private static String safeAddress(BluetoothDevice d) {
+        try {
+            return d == null ? "" : d.getAddress().toUpperCase(Locale.US);
+        } catch (Exception e) {
+            return "";
         }
     }
 
