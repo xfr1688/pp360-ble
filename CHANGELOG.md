@@ -4,15 +4,19 @@
 
 ## 安装
 
-下载地址（固定链接，始终指向最新构建）：
+每个版本都有独立的 Release，直接下对应版本的 APK：
 
-```
-https://github.com/xfr1688/pp360-ble/releases/download/latest/pp360-ble.apk
-```
-
-同一 release 里还挂着各版本的归档包：`pp360-ble-v0.3.apk`、`pp360-ble-v0.4.apk`、`pp360-ble-v0.5.apk`、`pp360-ble-v0.6.apk`。
+| 版本 | 下载链接 |
+| --- | --- |
+| 最新（固定入口） | `https://github.com/xfr1688/pp360-ble/releases/download/latest/pp360-ble.apk` |
+| v0.6 | `https://github.com/xfr1688/pp360-ble/releases/download/v0.6/pp360-ble-v0.6.apk` |
+| v0.5 | `https://github.com/xfr1688/pp360-ble/releases/download/v0.5/pp360-ble-v0.5.apk` |
+| v0.4 | `https://github.com/xfr1688/pp360-ble/releases/download/v0.4/pp360-ble-v0.4.apk` |
+| v0.3 | `https://github.com/xfr1688/pp360-ble/releases/download/v0.3/pp360-ble-v0.3.apk` |
 
 云端构建用的是 runner 自己生成的 debug 签名，和上一版不一致，覆盖安装报「应用未安装」时先卸载旧版。
+
+> 注：各版本 tag 是在网页上创建 Release 时生成的，commit 指针指向当时 main 的 HEAD（`ab87559`）；对应版本的源码提交以下表为准。
 
 ## 版本
 
@@ -29,3 +33,9 @@ https://github.com/xfr1688/pp360-ble/releases/download/latest/pp360-ble.apk
 
 - 固件没有反向指令（三轮二十余次实机 + 静态全命令号扫描确认），回退一格只能正转 17 步（约 17 秒）绕一圈。所以抓拍只能是「巡转 + 命中即停」，做不了实时左右闭环跟踪。
 - 全景拼接是「按角度取中段切片再横向平铺」的几何拼接，不是特征匹配拼接，接缝处受云台停位误差与视差影响，不保证严丝合缝。
+
+## 构建
+
+`.github/workflows/android.yml` 在 GitHub Actions 上构建：推 `android/**` 或改 workflow 会触发；第 4 个版本起每次会顺带把 v0.3 / v0.4 / v0.5 用 clean 构建重建一遍并归档到 `latest`。
+
+注意：`GITHUB_TOKEN` 在本仓库没有 `workflows` 权限，Actions 里 `gh release create` 会返回 403，因此带 tag 的版本 Release 目前是在网页手动创建的。
