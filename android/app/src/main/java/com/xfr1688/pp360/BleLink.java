@@ -34,30 +34,26 @@ import java.util.UUID;
 
 /**
  * 拍拍360（TL-6C）BLE 链路层。
- *
- * 只负责三件事：扫设备、建链路、发 17 字节帧。
- * 业务逻辑（角度、步进、连续旋转）全部在 MainActivity，改界面不用动这里。
+ * 只负责：扫设备、建链路、发 17 字节帧。所有回调已统一切到主线程。
  */
 public class BleLink {
 
-    /* ---------------- 协议常量 ---------------- */
     public static final UUID SVC_UUID  = UUID.fromString("00001910-0000-1000-8000-00805f9b34fb");
     public static final UUID W_UUID    = UUID.fromString("0000fff1-0000-1000-8000-00805f9b34fb");
     public static final UUID N_UUID    = UUID.fromString("0000fff4-0000-1000-8000-00805f9b34fb");
     public static final UUID CCCD_UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb");
 
-    public static final int CMD_STEP = 0x02;  // 前进一格 20°（speed=0 / refresh=1）
-    public static final int CMD_SPIN = 0x06;  // 连续旋转开关（发一次翻转一次）
+    public static final int CMD_STEP = 0x02;
+    public static final int CMD_SPIN = 0x06;
 
     private static final byte[] BASE = new byte[]{
             0x11, 0x01, 0x55, 0x01, 0x02, 0x00, 0x00, 0x00, 0x11,
             (byte) 0x88, (byte) 0x88, (byte) 0x88, 0x00, 0x00, 0x00, 0x0D, 0x0A
     };
 
-    /* ---------------- 回调 ---------------- */
     public interface Callback {
         void onLog(String msg);
-        void onState(String state);        // 未连接 / 连接中 / 已连接 设备名
+        void onState(String state);
         void onConnected(String name);
         void onNotify(byte[] value);
         void onDisconnected();
@@ -84,6 +80,52 @@ public class BleLink {
         mAdapter = (bm == null) ? null : bm.getAdapter();
     }
 
+    /* ---------------- 主线程分发 ---------------- */
+    private void pLog(final String m) {
+        ui.post(new Runnable() {
+            @Override
+            public void run() {
+                cb.onLog(m);
+            }
+        });
+    }
+
+    private void pState(final String s) {
+        ui.post(new Runnable() {
+            @Override
+            public void run() {
+                cb.onState(s);
+            }
+        });
+    }
+
+    private void pConnected(final String name) {
+        ui.post(new Runnable() {
+            @Override
+            public void run() {
+                cb.onConnected(name);
+            }
+        });
+    }
+
+    private void pNotify(final byte[] v) {
+        ui.post(new Runnable() {
+            @Override
+            public void run() {
+                cb.onNotify(v);
+            }
+        });
+    }
+
+    private void pDisconnected() {
+        ui.post(new Runnable() {
+            @Override
+            public void run() {
+                cb.onDisconnected();
+            }
+        });
+    }
+
     public boolean isSupported() {
         return mAdapter != null;
     }
@@ -96,15 +138,14 @@ public class BleLink {
         return safeName(mDevice);
     }
 
-    /* ====================== 扫描 ====================== */
-
+    /* ---------------- 扫描 ---------------- */
     public void scan() {
         if (mAdapter == null) {
-            cb.onLog("此设备不支持蓝牙");
+            pLog("此设备不支持蓝牙");
             return;
         }
         if (!mAdapter.isEnabled()) {
-            cb.onLog("蓝牙没开，先打开蓝牙");
+            pLog("蓝牙没开，先打开蓝牙");
             try {
                 activity.startActivity(new Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE));
             } catch (Exception ignored) {
@@ -144,8 +185,8 @@ public class BleLink {
         if (all) {
             startScan();
         } else {
-            cb.onLog("权限被拒绝，扫不了");
-            cb.onState("未连接");
+            pLog("权限被拒绝，扫不了");
+            pState("未连接");
         }
     }
 
@@ -155,14 +196,15 @@ public class BleLink {
         }
         mScanner = mAdapter.getBluetoothLeScanner();
         if (mScanner == null) {
-            cb.onLog("扫描不可用，检查蓝牙");
+            pLog("扫描不可用，检查蓝牙");
+            pState("未连接");
             return;
         }
         found.clear();
         names.clear();
         scanning = true;
-        cb.onState("扫描中…最多 10 秒");
-        cb.onLog("开始扫描 BLE 设备");
+        pState("扫描中…最多 10 秒");
+        pLog("开始扫描 BLE 设备");
         ScanSettings st = new ScanSettings.Builder()
                 .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
                 .build();
@@ -170,8 +212,8 @@ public class BleLink {
             mScanner.startScan(null, st, scanCb);
         } catch (Exception e) {
             scanning = false;
-            cb.onLog("启动扫描失败：" + e);
-            cb.onState("未连接");
+            pLog("启动扫描失败：" + e);
+            pState("未连接");
             return;
         }
         ui.postDelayed(new Runnable() {
@@ -200,14 +242,14 @@ public class BleLink {
             }
             found.put(addr, d);
             names.put(addr, nm);
-            cb.onLog("发现 " + (nm == null || nm.isEmpty() ? "(无名)" : nm)
+            pLog("发现 " + (nm == null || nm.isEmpty() ? "(无名)" : nm)
                     + "  " + addr + "  RSSI " + result.getRssi());
         }
 
         @Override
         public void onScanFailed(int errorCode) {
             scanning = false;
-            cb.onLog("扫描失败 errorCode=" + errorCode);
+            pLog("扫描失败 errorCode=" + errorCode);
         }
     };
 
@@ -224,8 +266,8 @@ public class BleLink {
         }
 
         if (found.isEmpty()) {
-            cb.onLog("扫描结束：0 个设备");
-            cb.onState("未连接");
+            pLog("扫描结束：0 个设备。先短按云台电源键（灯亮），10 秒内再扫");
+            pState("未连接");
             return;
         }
 
@@ -248,7 +290,7 @@ public class BleLink {
             items[i] = (n == null || n.isEmpty() ? "(无名)" : n) + "   " + d.getAddress();
         }
 
-        cb.onLog("扫描到 " + devs.size() + " 个设备");
+        pLog("扫描到 " + devs.size() + " 个设备");
         new AlertDialog.Builder(activity)
                 .setTitle("选择云台")
                 .setItems(items, new DialogInterface.OnClickListener() {
@@ -261,108 +303,97 @@ public class BleLink {
                 .show();
     }
 
-    /* ====================== 建链路 ====================== */
-
+    /* ---------------- 建链路 ---------------- */
     private void connectTo(BluetoothDevice d) {
         closeGatt();
         mDevice = d;
-        cb.onState("连接中…");
-        cb.onLog("连接 " + safeName(d) + "  " + d.getAddress());
+        pState("连接中…");
+        pLog("连接 " + safeName(d) + "  " + d.getAddress());
         try {
             mGatt = d.connectGatt(activity, false, gattCb, BluetoothDevice.TRANSPORT_LE);
         } catch (Exception e) {
-            cb.onLog("连接异常：" + e);
-            cb.onState("连接失败");
+            pLog("连接异常：" + e);
+            pState("连接失败");
         }
     }
 
     private final BluetoothGattCallback gattCb = new BluetoothGattCallback() {
         @Override
-        public void onConnectionStateChange(final BluetoothGatt g, int status, int newState) {
+        public void onConnectionStateChange(BluetoothGatt g, int status, int newState) {
             if (newState == BluetoothProfile.STATE_CONNECTED) {
-                cb.onState("已连接，发现服务…");
-                cb.onLog("链路已建立，开始发现服务");
+                pState("已连接，发现服务…");
+                pLog("链路已建立，开始发现服务");
                 try {
                     g.discoverServices();
                 } catch (Exception e) {
-                    cb.onLog("discoverServices 异常：" + e);
+                    pLog("discoverServices 异常：" + e);
                 }
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                ui.post(new Runnable() {
-                    @Override
-                    public void run() {
-                        if (mGatt == g) {
-                            mGatt = null;
-                        }
-                        chW = null;
-                        chN = null;
-                        cb.onLog("链路断开 status=" + status);
-                        cb.onDisconnected();
-                    }
-                });
+                if (mGatt == g) {
+                    mGatt = null;
+                }
+                chW = null;
+                chN = null;
+                pLog("链路断开 status=" + status);
+                pDisconnected();
             }
         }
 
         @Override
-        public void onServicesDiscovered(final BluetoothGatt g, int status) {
-            ui.post(new Runnable() {
-                @Override
-                public void run() {
-                    BluetoothGattCharacteristic w = null;
-                    BluetoothGattCharacteristic n = null;
-                    try {
-                        BluetoothGattService s = g.getService(SVC_UUID);
-                        if (s != null) {
-                            w = s.getCharacteristic(W_UUID);
-                            n = s.getCharacteristic(N_UUID);
-                        }
-                        if (w == null) {
-                            for (BluetoothGattService ss : g.getServices()) {
-                                for (BluetoothGattCharacteristic c : ss.getCharacteristics()) {
-                                    if (c.getUuid().equals(W_UUID)) {
-                                        w = c;
-                                    }
-                                    if (c.getUuid().equals(N_UUID)) {
-                                        n = c;
-                                    }
-                                }
+        public void onServicesDiscovered(BluetoothGatt g, int status) {
+            BluetoothGattCharacteristic w = null;
+            BluetoothGattCharacteristic n = null;
+            try {
+                BluetoothGattService s = g.getService(SVC_UUID);
+                if (s != null) {
+                    w = s.getCharacteristic(W_UUID);
+                    n = s.getCharacteristic(N_UUID);
+                }
+                if (w == null) {
+                    for (BluetoothGattService ss : g.getServices()) {
+                        for (BluetoothGattCharacteristic c : ss.getCharacteristics()) {
+                            if (c.getUuid().equals(W_UUID)) {
+                                w = c;
+                            }
+                            if (c.getUuid().equals(N_UUID)) {
+                                n = c;
                             }
                         }
-                    } catch (Exception e) {
-                        cb.onLog("遍历服务异常：" + e);
                     }
-
-                    if (w == null) {
-                        cb.onLog("没找到 fff1（status=" + status + "），可能不是 TL-6C");
-                        cb.onState("连接失败：无 fff1");
-                        try {
-                            g.close();
-                        } catch (Exception ignored) {
-                        }
-                        mGatt = null;
-                        return;
-                    }
-                    chW = w;
-                    chN = n;
-                    cb.onLog("写特征 fff1 OK" + (n != null ? " · 通知 fff4 OK" : "（无 fff4，仍能发指令）"));
-                    if (n != null) {
-                        enableNotify(g, n);
-                    }
-                    cb.onConnected(safeName(mDevice));
                 }
-            });
+            } catch (Exception e) {
+                pLog("遍历服务异常：" + e);
+            }
+
+            if (w == null) {
+                pLog("没找到 fff1（status=" + status + "），可能不是 TL-6C");
+                pState("连接失败：无 fff1");
+                try {
+                    g.close();
+                } catch (Exception ignored) {
+                }
+                mGatt = null;
+                return;
+            }
+            chW = w;
+            chN = n;
+            pLog("写特征 fff1 OK" + (n != null ? " · 通知 fff4 OK" : "（无 fff4，仍能发指令）"));
+            if (n != null) {
+                enableNotify(g, n);
+            }
+            pConnected(safeName(mDevice));
         }
 
         @Override
         public void onDescriptorWrite(BluetoothGatt g, BluetoothGattDescriptor d, int status) {
             if (d != null && d.getUuid().equals(CCCD_UUID)) {
-                cb.onLog("通知已开启（CCCD status=" + status + "）");
+                pLog("通知已开启（CCCD status=" + status + "）");
             }
         }
 
         @Override
         public void onCharacteristicChanged(BluetoothGatt g, BluetoothGattCharacteristic c) {
-            cb.onNotify(c.getValue());
+            pNotify(c.getValue());
         }
     };
 
@@ -371,7 +402,7 @@ public class BleLink {
             g.setCharacteristicNotification(n, true);
             BluetoothGattDescriptor d = n.getDescriptor(CCCD_UUID);
             if (d == null) {
-                cb.onLog("没有 CCCD 描述符（不影响发指令）");
+                pLog("没有 CCCD 描述符（不影响发指令）");
                 return;
             }
             if (Build.VERSION.SDK_INT >= 33) {
@@ -381,17 +412,16 @@ public class BleLink {
                 g.writeDescriptor(d);
             }
         } catch (Exception e) {
-            cb.onLog("开通知异常：" + e);
+            pLog("开通知异常：" + e);
         }
     }
 
-    /* ====================== 发送 ====================== */
-
+    /* ---------------- 发送 ---------------- */
     public static byte[] frame(int cmd) {
         byte[] f = BASE.clone();
         f[5] = (byte) cmd;
-        f[6] = 0;   // speed，固件只认 0
-        f[7] = 1;   // refresh，固件只认 1
+        f[6] = 0;
+        f[7] = 1;
         return f;
     }
 
@@ -413,12 +443,11 @@ public class BleLink {
                 return g.writeCharacteristic(w);
             }
         } catch (Exception e) {
-            cb.onLog("写入异常：" + e);
+            pLog("写入异常：" + e);
             return false;
         }
     }
 
-    /** 每发一次 0x06 翻转一次状态；0x0E 在本机无效 */
     public boolean toggleSpin() {
         return send(frame(CMD_SPIN));
     }
@@ -429,8 +458,8 @@ public class BleLink {
 
     public void disconnect() {
         closeGatt();
-        cb.onLog("已主动断开，BLE 链路已释放");
-        cb.onDisconnected();
+        pLog("已主动断开，BLE 链路已释放");
+        pDisconnected();
     }
 
     private void closeGatt() {
