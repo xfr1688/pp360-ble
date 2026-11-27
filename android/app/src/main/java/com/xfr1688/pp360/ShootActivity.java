@@ -1,12 +1,17 @@
 package com.xfr1688.pp360;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.Context;
+import android.content.DialogInterface;
 import android.content.pm.PackageManager;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
 import android.graphics.Paint;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.media.MediaScannerConnection;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -15,16 +20,28 @@ import android.view.Gravity;
 import android.view.TextureView;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.AbsListView;
+import android.widget.AdapterView;
+import android.widget.BaseAdapter;
 import android.widget.FrameLayout;
+import android.widget.GridView;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
+
+import java.io.File;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.List;
 
 /**
  * 拍摄页（独立 Activity，全屏取景）。
  *
  * 四种模式：单拍 / 定时（每张后云台正转一格）/ 全景（18 格一圈）/ 抓拍（巡转找人脸，居中即停并拍）。
- * 云台动作通过 MainActivity 的静态桥发出去，保持单一 BLE 连接。
+ * 底部缩略图点开是应用内相册，可看大图、长按删除。云台动作通过 MainActivity 的静态桥发出去。
  */
 public class ShootActivity extends Activity {
 
@@ -49,7 +66,13 @@ public class ShootActivity extends Activity {
     private TextureView tex;
     private Overlay overlay;
     private TextView tvTop, tvHint, tvParam, tvLast, btnRun;
+    private ImageView ivThumb;
     private final TextView[] chips = new TextView[4];
+
+    private FrameLayout galleryLayer;
+    private GridView grid;
+    private TextView tvGalTitle;
+    private PhotoAdapter adapter;
 
     private CameraController cam;
     private int mode = MODE_SHOT;
@@ -74,6 +97,7 @@ public class ShootActivity extends Activity {
             tvTop.setTextColor(C_GOLD);
             requestPermissions(new String[]{"android.permission.CAMERA"}, REQ_CAM);
         }
+        refreshThumb();
     }
 
     @Override
@@ -92,6 +116,15 @@ public class ShootActivity extends Activity {
             cam = null;
         }
         super.onPause();
+    }
+
+    @Override
+    public void onBackPressed() {
+        if (galleryLayer != null && galleryLayer.getVisibility() == View.VISIBLE) {
+            galleryLayer.setVisibility(View.GONE);
+            return;
+        }
+        super.onBackPressed();
     }
 
     @Override
@@ -122,7 +155,7 @@ public class ShootActivity extends Activity {
         tvTop.setTextColor(C_DIM);
     }
 
-    /* ====================== 界面 ====================== */
+    /* ====================== 基础工具 ====================== */
 
     private int dp(int v) {
         return (int) (v * getResources().getDisplayMetrics().density + 0.5f);
@@ -166,6 +199,19 @@ public class ShootActivity extends Activity {
         r.setGravity(Gravity.CENTER_VERTICAL);
         return r;
     }
+
+    private File shotDir() {
+        File d = getExternalFilesDir("shots");
+        if (d == null) {
+            d = new File(getFilesDir(), "shots");
+        }
+        if (!d.exists()) {
+            d.mkdirs();
+        }
+        return d;
+    }
+
+    /* ====================== 界面 ====================== */
 
     private void buildUi() {
         FrameLayout root = new FrameLayout(this);
@@ -302,20 +348,279 @@ public class ShootActivity extends Activity {
         });
         bottom.addView(btnRun);
 
-        tvLast = tv("还没有照片 · 存于本机 Android/data/com.xfr1688.pp360/files/shots", 10, C_DIM, false);
-        tvLast.setGravity(Gravity.CENTER);
-        LinearLayout.LayoutParams llp = new LinearLayout.LayoutParams(
+        LinearLayout lastRow = row();
+        lastRow.setGravity(Gravity.CENTER);
+        LinearLayout.LayoutParams lrp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        llp.topMargin = dp(8);
-        tvLast.setLayoutParams(llp);
-        bottom.addView(tvLast);
+        lrp.topMargin = dp(9);
+        lastRow.setLayoutParams(lrp);
+
+        ivThumb = new ImageView(this);
+        ivThumb.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        ivThumb.setBackgroundColor(C_CARD);
+        ivThumb.setVisibility(View.GONE);
+        LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(dp(42), dp(42));
+        ilp.rightMargin = dp(10);
+        ivThumb.setLayoutParams(ilp);
+        ivThumb.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                openGallery();
+            }
+        });
+        lastRow.addView(ivThumb);
+
+        tvLast = tv("还没有照片 · 点这里看相册", 10, C_DIM, false);
+        tvLast.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                openGallery();
+            }
+        });
+        lastRow.addView(tvLast);
+        bottom.addView(lastRow);
+
+        buildGallery(root);
 
         setMode(MODE_SHOT);
-lateRefreshRun();
+        refreshRun();
     }
 
-    private void lateRefreshRun() {
-        refreshRun();
+    /* ====================== 相册层 ====================== */
+
+    private void buildGallery(FrameLayout root) {
+        galleryLayer = new FrameLayout(this);
+        galleryLayer.setBackgroundColor(C_BG);
+        galleryLayer.setVisibility(View.GONE);
+        root.addView(galleryLayer, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+        LinearLayout col = new LinearLayout(this);
+        col.setOrientation(LinearLayout.VERTICAL);
+        galleryLayer.addView(col, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+        LinearLayout bar = row();
+        bar.setBackgroundColor(0xFF0C0E13);
+        bar.setPadding(dp(16), dp(14), dp(16), dp(14));
+        TextView back = tv("‹ 返回", 13, C_BLUE, false);
+        back.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                galleryLayer.setVisibility(View.GONE);
+            }
+        });
+        bar.addView(back);
+        View sp = new View(this);
+        bar.addView(sp, new LinearLayout.LayoutParams(0, 1, 1f));
+        tvGalTitle = tv("", 11, C_DIM, false);
+        bar.addView(tvGalTitle);
+        col.addView(bar);
+
+        grid = new GridView(this);
+        grid.setNumColumns(3);
+        grid.setHorizontalSpacing(dp(6));
+        grid.setVerticalSpacing(dp(6));
+        grid.setPadding(dp(8), dp(8), dp(8), dp(8));
+        grid.setBackgroundColor(C_BG);
+        grid.setStretchMode(GridView.STRETCH_COLUMN_WIDTH);
+        adapter = new PhotoAdapter();
+        grid.setAdapter(adapter);
+        grid.setOnItemClickListener(new AdapterView.OnItemClickListener() {
+            @Override
+            public void onItemClick(AdapterView<?> parent, View view, int position, long id) {
+                Object o = adapter.getItem(position);
+                if (o instanceof File) {
+                    showBig((File) o);
+                }
+            }
+        });
+        LinearLayout.LayoutParams glp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f);
+        grid.setLayoutParams(glp);
+        col.addView(grid);
+
+        TextView tip = tv("点看大图 · 长按删除", 10, 0xFF5A6068, false);
+        tip.setGravity(Gravity.CENTER);
+        tip.setPadding(0, dp(8), 0, dp(12));
+        col.addView(tip);
+    }
+
+    private void openGallery() {
+        adapter.reload();
+        tvGalTitle.setText(adapter.getCount() + " 张");
+        galleryLayer.setVisibility(View.VISIBLE);
+    }
+
+    private void showBig(File f) {
+        ImageView iv = new ImageView(this);
+        iv.setBackgroundColor(0xFF000000);
+        iv.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        iv.setLayoutParams(new ViewGroup.LayoutParams(dp(300), dp(400)));
+        Bitmap bmp = decode(f, 1400);
+        if (bmp == null) {
+            toast("读不出这张");
+            return;
+        }
+        iv.setImageBitmap(bmp);
+        final AlertDialog dlg = new AlertDialog.Builder(this)
+                .setView(iv)
+                .setNegativeButton("关闭", null)
+                .setPositiveButton("删除", new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface d, int w) {
+                        // 这里只关闭，真正删除交给长按，避免误触
+                    }
+                })
+                .create();
+        dlg.show();
+        try {
+            dlg.getWindow().setLayout(dp(320), dp(440));
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void confirmDelete(final File f) {
+        if (f == null || !f.exists()) {
+            return;
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("删除这张照片？")
+                .setMessage(f.getName())
+                .setNegativeButton("取消", null)
+                .setPositiveButton("删除", new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface d, int w) {
+                        if (f.delete()) {
+                            adapter.reload();
+                            tvGalTitle.setText(adapter.getCount() + " 张");
+                            refreshThumb();
+                            toast("已删除");
+                        } else {
+                            toast("删不掉");
+                        }
+                    }
+                })
+                .show();
+    }
+
+    private Bitmap decode(File f, int maxPx) {
+        try {
+            BitmapFactory.Options o = new BitmapFactory.Options();
+            o.inJustDecodeBounds = true;
+            BitmapFactory.decodeFile(f.getAbsolutePath(), o);
+            int side = Math.max(o.outWidth, o.outHeight);
+            int s = 1;
+            while (side / (s * 2) >= maxPx) {
+                s *= 2;
+            }
+            o.inJustDecodeBounds = false;
+            o.inSampleSize = s;
+            return BitmapFactory.decodeFile(f.getAbsolutePath(), o);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private File[] listShots() {
+        List<File> list = new ArrayList<File>();
+        File[] fs = shotDir().listFiles();
+        if (fs != null) {
+            for (int i = 0; i < fs.length; i++) {
+                if (fs[i].getName().endsWith(".jpg")) {
+                    list.add(fs[i]);
+                }
+            }
+        }
+        Collections.sort(list, new Comparator<File>() {
+            @Override
+            public int compare(File a, File b) {
+                long x = b.lastModified();
+                long y = a.lastModified();
+                return x > y ? 1 : (x < y ? -1 : 0);
+            }
+        });
+        return list.toArray(new File[list.size()]);
+    }
+
+    private void refreshThumb() {
+        if (ivThumb == null) {
+            return;
+        }
+        File[] fs = listShots();
+        if (fs.length == 0) {
+            ivThumb.setVisibility(View.GONE);
+            tvLast.setText("还没有照片 · 点这里看相册");
+            tvLast.setTextColor(C_DIM);
+            return;
+        }
+        Bitmap b = decode(fs[0], 160);
+        if (b != null) {
+            ivThumb.setImageBitmap(b);
+            ivThumb.setVisibility(View.VISIBLE);
+        }
+        tvLast.setText(fs[0].getName());
+        tvLast.setTextColor(C_TEXT);
+    }
+
+    /** 相册网格 */
+    class PhotoAdapter extends BaseAdapter {
+        private File[] files = new File[0];
+        private final HashMap<String, Bitmap> cache = new HashMap<String, Bitmap>();
+
+        void reload() {
+            files = listShots();
+            cache.clear();
+            notifyDataSetChanged();
+        }
+
+        @Override
+        public int getCount() {
+            return files.length;
+        }
+
+        @Override
+        public Object getItem(int i) {
+            return i >= 0 && i < files.length ? files[i] : null;
+        }
+
+        @Override
+        public long getItemId(int i) {
+            return i;
+        }
+
+        @Override
+        public View getView(int i, View convert, ViewGroup parent) {
+            ImageView iv;
+            if (convert instanceof ImageView) {
+                iv = (ImageView) convert;
+            } else {
+                iv = new ImageView(ShootActivity.this);
+                iv.setLayoutParams(new AbsListView.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, dp(112)));
+                iv.setScaleType(ImageView.ScaleType.CENTER_CROP);
+                iv.setBackgroundColor(C_CARD);
+            }
+            final File f = files[i];
+            String key = f.getAbsolutePath();
+            Bitmap b = cache.get(key);
+            if (b == null) {
+                b = decode(f, 240);
+                if (b != null) {
+                    cache.put(key, b);
+                }
+            }
+            iv.setImageBitmap(b);
+            iv.setTag(key);
+            iv.setOnLongClickListener(new View.OnLongClickListener() {
+                @Override
+                public boolean onLongClick(View v) {
+                    confirmDelete(f);
+                    return true;
+                }
+            });
+            return iv;
+        }
     }
 
     /* ====================== 模式 ====================== */
@@ -513,10 +818,6 @@ lateRefreshRun();
     private final CameraController.Cb camCb = new CameraController.Cb() {
         @Override
         public void camLog(String m) {
-            if (m.contains("就绪") && tvTop != null) {
-                tvTop.setText(m);
-                tvTop.setTextColor(C_BLUE);
-            }
         }
 
         @Override
@@ -535,15 +836,25 @@ lateRefreshRun();
             photoBusy = false;
             tvTop.setText(m);
             tvTop.setTextColor(C_RED);
+            tvHint.setText(m);
+            tvHint.setTextColor(C_RED);
         }
 
         @Override
         public void camShot(String path) {
             photoBusy = false;
             String n = path.substring(path.lastIndexOf('/') + 1);
-            tvLast.setText("最近 · " + n);
+            tvLast.setText(n);
             tvLast.setTextColor(C_TEXT);
-            toast("已保存 " + n);
+            refreshThumb();
+            if (adapter != null && galleryLayer != null && galleryLayer.getVisibility() == View.VISIBLE) {
+                adapter.reload();
+                tvGalTitle.setText(adapter.getCount() + " 张");
+            }
+            try {
+                MediaScannerConnection.scanFile(ShootActivity.this, new String[]{path}, null, null);
+            } catch (Exception ignored) {
+            }
             if (mode == MODE_TRACK && running) {
                 running = false;
                 refreshRun();
