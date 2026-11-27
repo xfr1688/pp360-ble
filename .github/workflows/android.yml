@@ -14,9 +14,12 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -40,6 +43,7 @@ jobs:
         run: |
           mkdir -p out
           cp android/app/build/outputs/apk/debug/app-debug.apk out/pp360-ble.apk
+          cp android/app/build/outputs/apk/debug/app-debug.apk out/pp360-ble-v0.6.apk
           ls -lh out/pp360-ble.apk
 
       - name: Upload artifact
@@ -49,7 +53,7 @@ jobs:
           name: pp360-ble-apk
           path: out/pp360-ble.apk
 
-      - name: Publish to Release
+      - name: Publish latest to Release
         if: success()
         continue-on-error: true
         env:
@@ -60,45 +64,39 @@ jobs:
           gh release upload latest out/pp360-ble.apk --clobber >> publish.log 2>&1
           echo "latest upload exit=$?" >> publish.log
 
-      - name: Publish version releases
+      - name: Rebuild historical version APKs
         if: always()
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set +e
-          touch publish.log
-          publish() {
-            tag="$1"; target="$2"; title="$3"; notes="$4"; asset="$5"
-            echo "=== $tag ===" >> publish.log
-            if gh release view "$tag" >> publish.log 2>&1; then
-              echo "$tag already exists" >> publish.log
-              return 0
-            fi
-            if [ -n "$asset" ] && [ -f "$asset" ]; then
-              gh release create "$tag" "$asset" --target "$target" --title "$title" --notes "$notes" >> publish.log 2>&1
+          touch publish.log rebuild.log
+          mkdir -p out
+          cp android/app/build/outputs/apk/debug/app-debug.apk out/pp360-ble-v0.6.apk 2>/dev/null
+          for pair in be97515:0.3 0634d06:0.4 aa4e843:0.5; do
+            sha="${pair%%:*}"
+            ver="${pair##*:}"
+            echo "=== rebuild v$ver from $sha ===" >> publish.log
+            git checkout -f "$sha" >> rebuild.log 2>&1
+            ( cd android && gradle :app:assembleDebug --no-daemon --stacktrace ) >> rebuild.log 2>&1
+            if [ -f android/app/build/outputs/apk/debug/app-debug.apk ]; then
+              cp android/app/build/outputs/apk/debug/app-debug.apk "out/pp360-ble-v$ver.apk"
+              echo "v$ver build ok" >> publish.log
             else
-              gh release create "$tag" --target "$target" --title "$title" --notes "$notes" >> publish.log 2>&1
+              echo "v$ver build failed" >> publish.log
             fi
-            echo "create exit=$?" >> publish.log
-          }
-          publish "v0.3" "be97515" "PP360 v0.3 - 相机拍摄" "单拍 / 定时（3s×6、5s×12、10s×18）/ 全景 18 格 / 人脸抓拍四种模式；拍摄页为独立 Activity，相机生命周期与页面绑定。本版 APK 未存档，可检出该 tag 源码自行构建。" ""
-          publish "v0.4" "0634d06" "PP360 v0.4 - 自适应图标 + 应用内相册" "桌面矢量自适应图标（Android 8+ 不套白底）；拍摄页真实缩略图；应用内相册（看大图 / 长按删除）。本版 APK 未存档，可检出该 tag 源码自行构建。" ""
-          publish "v0.5" "aa4e843" "PP360 v0.5 - 修复抓拍 / 全景 / 多选" "人脸检测改用 android.media.FaceDetector 软件检测；拍照前 autoFocus + 900ms 兜底；抓拍连续 3 帧命中再停转拍摄；全景 18 张自动拼成一张展开图；相册多选删除 / 多选导出到 Pictures/PP360。" ""
-          publish "v0.6" "9e3ff94" "PP360 v0.6 - 横竖屏自适应" "预览与 JPEG 方向按设备旋转角实时计算；预览按真实比例居中裁满不变形；横屏时上下栏收窄、相册变 5 列；全景横屏切 40% 更宽、拼接统一高度并提升到 960px；抓拍判据放宽并加 60 秒兜底自动停。" "out/pp360-ble.apk"
-          echo "publish done" >> publish.log
+          done
+          ls -lh out/ >> publish.log 2>&1
+          gh release upload latest out/pp360-ble-v0.3.apk out/pp360-ble-v0.4.apk out/pp360-ble-v0.5.apk out/pp360-ble-v0.6.apk --clobber >> publish.log 2>&1
+          echo "version upload exit=$?" >> publish.log
 
-      - name: Upload publish log
+      - name: Upload logs
         if: always()
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload latest publish.log --clobber
-
-      - name: Upload build log on failure
-        if: failure()
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if [ -f build.log ]; then tail -c 200000 build.log > p360-build.log; else echo "no build.log captured" > p360-build.log; fi
-          gh release upload latest p360-build.log --clobber
+          gh release upload latest publish.log --clobber || true
+          if [ -f build.log ]; then tail -c 100000 build.log > p360-build.log; gh release upload latest p360-build.log --clobber || true; fi
+          if [ -f rebuild.log ]; then tail -c 200000 rebuild.log > p360-rebuild.log; gh release upload latest p360-rebuild.log --clobber || true; fi
