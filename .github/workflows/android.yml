@@ -85,16 +85,15 @@ jobs:
               ( cd android && gradle clean :app:assembleDebug --no-daemon --stacktrace ) >> rebuild.log 2>&1
               if [ -f android/app/build/outputs/apk/debug/app-debug.apk ]; then
                 cp android/app/build/outputs/apk/debug/app-debug.apk "out/pp360-ble-v$ver.apk"
-                echo "v$ver build ok size=$(stat -c%s out/pp360-ble-v$ver.apk)" >> publish.log
+                echo "v$ver build ok" >> publish.log
               else
                 echo "v$ver build failed" >> publish.log
               fi
             done
             gh release upload latest out/pp360-ble-v0.3.apk out/pp360-ble-v0.4.apk out/pp360-ble-v0.5.apk out/pp360-ble-v0.6.apk --clobber >> publish.log 2>&1
-            echo "version upload exit=$?" >> publish.log
           fi
 
-      - name: Create tagged version releases
+      - name: Push version tags and create releases
         if: always()
         continue-on-error: true
         env:
@@ -104,24 +103,37 @@ jobs:
           mkdir -p out
           gh release download latest -D out -p "pp360-ble-v*.apk" --clobber >> publish.log 2>&1
           ls -lh out/ >> publish.log 2>&1
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/xfr1688/pp360-ble.git"
+          push_tag() {
+            tag="$1"; sha="$2"
+            git tag -f "$tag" "$sha" >> publish.log 2>&1
+            git push -f origin "refs/tags/$tag" >> publish.log 2>&1
+            echo "tag $tag push exit=$?" >> publish.log
+          }
+          push_tag v0.3 be97515
+          push_tag v0.4 0634d06
+          push_tag v0.5 aa4e843
+          push_tag v0.6 9e3ff94
           publish() {
-            tag="$1"; target="$2"; title="$3"; notes="$4"; asset="$5"
+            tag="$1"; title="$2"; notes="$3"; asset="$4"
             echo "=== release $tag ===" >> publish.log
             if gh release view "$tag" >/dev/null 2>&1; then
               echo "$tag already exists" >> publish.log
               return 0
             fi
             if [ -n "$asset" ] && [ -f "$asset" ]; then
-              gh release create "$tag" "$asset" --target "$target" --title "$title" --notes "$notes" >> publish.log 2>&1
+              gh release create "$tag" "$asset" --verify-tag --title "$title" --notes "$notes" >> publish.log 2>&1
             else
-              gh release create "$tag" --target "$target" --title "$title" --notes "$notes" >> publish.log 2>&1
+              gh release create "$tag" --verify-tag --title "$title" --notes "$notes" >> publish.log 2>&1
             fi
             echo "create exit=$?" >> publish.log
           }
-          publish "v0.3" "be97515" "PP360 v0.3 - 相机拍摄" "单拍 / 定时（3s×6、5s×12、10s×18）/ 全景 18 格 / 人脸抓拍四种模式；拍摄页独立 Activity，云台命令走静态桥保持单连接。" "out/pp360-ble-v0.3.apk"
-          publish "v0.4" "0634d06" "PP360 v0.4 - 自适应图标 + 应用内相册" "自适应桌面图标（Android 8+ 不套白底）；拍摄页真实缩略图；应用内相册（看大图 / 长按删除）。" "out/pp360-ble-v0.4.apk"
-          publish "v0.5" "aa4e843" "PP360 v0.5 - 修复抓拍 / 全景 / 多选" "人脸检测改用 android.media.FaceDetector 软件检测；拍照前 autoFocus + 900ms 兜底；抓拍连续 3 帧命中再停转拍摄；全景 18 张自动拼成一张展开图；相册多选删除 / 多选导出到 Pictures/PP360。" "out/pp360-ble-v0.5.apk"
-          publish "v0.6" "9e3ff94" "PP360 v0.6 - 横竖屏自适应" "预览与 JPEG 方向按设备旋转角实时计算；预览按真实比例居中裁满；横屏时上下栏收窄、相册变 5 列；全景横屏切 40%、拼接提升到 960px；抓拍判据放宽并加 60 秒兜底。" "out/pp360-ble-v0.6.apk"
+          publish v0.3 "PP360 v0.3 - 相机拍摄" "单拍 / 定时（3s×6、5s×12、10s×18）/ 全景 18 格 / 人脸抓拍四种模式；拍摄页独立 Activity，云台命令走静态桥保持单连接。" "out/pp360-ble-v0.3.apk"
+          publish v0.4 "PP360 v0.4 - 自适应图标 + 应用内相册" "自适应桌面图标（Android 8+ 不套白底）；拍摄页真实缩略图；应用内相册（看大图 / 长按删除）。" "out/pp360-ble-v0.4.apk"
+          publish v0.5 "PP360 v0.5 - 修复抓拍 / 全景 / 多选" "人脸检测改用 android.media.FaceDetector 软件检测；拍照前 autoFocus + 900ms 兜底；抓拍连续 3 帧命中再停转拍摄；全景 18 张自动拼成一张展开图；相册多选删除 / 多选导出到 Pictures/PP360。" "out/pp360-ble-v0.5.apk"
+          publish v0.6 "PP360 v0.6 - 横竖屏自适应" "预览与 JPEG 方向按设备旋转角实时计算；预览按真实比例居中裁满；横屏时上下栏收窄、相册变 5 列；全景横屏切 40%、拼接提升到 960px；抓拍判据放宽并加 60 秒兜底。" "out/pp360-ble-v0.6.apk"
           gh release edit latest --latest >> publish.log 2>&1
           echo "mark latest exit=$?" >> publish.log
 
