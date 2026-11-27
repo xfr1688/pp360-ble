@@ -41,7 +41,7 @@ import java.util.List;
  * 拍摄页（独立 Activity，全屏取景）。
  *
  * 四种模式：单拍 / 定时（每张后云台正转一格）/ 全景（18 格一圈）/ 抓拍（巡转找人脸，居中即停并拍）。
- * 底部缩略图点开是应用内相册，可看大图、长按删除。云台动作通过 MainActivity 的静态桥发出去。
+ * 底部缩略图点开是应用内相册，可看大图、删除。云台动作通过 MainActivity 的静态桥发出去。
  */
 public class ShootActivity extends Activity {
 
@@ -452,7 +452,7 @@ public class ShootActivity extends Activity {
         galleryLayer.setVisibility(View.VISIBLE);
     }
 
-    private void showBig(File f) {
+    private void showBig(final File f) {
         ImageView iv = new ImageView(this);
         iv.setBackgroundColor(0xFF000000);
         iv.setScaleType(ImageView.ScaleType.FIT_CENTER);
@@ -469,7 +469,8 @@ public class ShootActivity extends Activity {
                 .setPositiveButton("删除", new DialogInterface.OnClickListener() {
                     @Override
                     public void onClick(DialogInterface d, int w) {
-                        // 这里只关闭，真正删除交给长按，避免误触
+                        d.dismiss();
+                        confirmDelete(f);
                     }
                 })
                 .create();
