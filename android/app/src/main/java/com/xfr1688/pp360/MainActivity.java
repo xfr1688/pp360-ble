@@ -80,6 +80,7 @@ public class MainActivity extends Activity {
     /* ---------------- 设置 ---------------- */
     private Switch swAuto;
     private TextView tvSetDev, tvSetMac, tvSetState;
+    private LinearLayout devEntry;
 
     /* ---------------- 开发者 ---------------- */
     private TextView tvLog, tvDiag;
@@ -432,7 +433,7 @@ public class MainActivity extends Activity {
         pref.addView(prefRow);
         addTop(col, pref, 12);
 
-        LinearLayout devEntry = row();
+        devEntry = row();
         devEntry.setBackground(round(C_CARD, C_LINE, 18, 1));
         devEntry.setPadding(p, dp(18), p, dp(18));
         LinearLayout devTexts = new LinearLayout(this);
@@ -623,6 +624,12 @@ public class MainActivity extends Activity {
                 tvOther.setVisibility(View.GONE);
             }
         });
+        devEntry.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                showPage(3);
+            }
+        });
         swAuto.setOnCheckedChangeListener(new android.widget.CompoundButton.OnCheckedChangeListener() {
             @Override
             public void onCheckedChanged(android.widget.CompoundButton b, boolean checked) {
@@ -678,32 +685,6 @@ public class MainActivity extends Activity {
                 sendRaw();
             }
         });
-        devEntryClickHook();
-    }
-
-    /** 设置页的「开发者选项」整行点击 -> 进第四页 */
-    private void devEntryClickHook() {
-        // 入口行是通过 devTexts 的父容器注册的，这里用页面内的查找方式
-        if (pageSet == null) {
-            return;
-        }
-        LinearLayout col = null;
-        Object tag = pageSet.getChildAt(0);
-        if (tag instanceof LinearLayout) {
-            col = (LinearLayout) tag;
-        }
-        if (col == null || col.getChildCount() < 4) {
-            return;
-        }
-        View entry = col.getChildAt(3);
-        if (entry != null) {
-            entry.setOnClickListener(new View.OnClickListener() {
-                @Override
-                public void onClick(View v) {
-                    showPage(3);
-                }
-            });
-        }
     }
 
     /* ====================== 扫描结果渲染 ====================== */
@@ -854,10 +835,11 @@ public class MainActivity extends Activity {
                 tvScanHint.setTextColor(C_RED);
                 return;
             }
-            tvScanHint.setText("可用设备 " + named.size() + " 台");
             if (named.isEmpty()) {
                 tvScanHint.setTextColor(C_RED);
                 tvScanHint.setText("只搜到未命名设备，点下方展开看看");
+            } else {
+                tvScanHint.setText("可用设备 " + named.size() + " 台");
             }
             if (unnamed.size() > 0 && !unnamedShown) {
                 tvOther.setText("另有 " + unnamed.size() + " 台未命名设备，点此展开");
