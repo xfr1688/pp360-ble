@@ -6,9 +6,11 @@ import android.content.ContentValues;
 import android.content.Context;
 import android.content.DialogInterface;
 import android.content.pm.PackageManager;
+import android.content.res.Configuration;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
+import android.graphics.Matrix;
 import android.graphics.Paint;
 import android.graphics.Rect;
 import android.graphics.Typeface;
@@ -55,6 +57,7 @@ import java.util.Set;
  *
  * 模式：拍照 / 定时 / 全景（拍完自动拼成一张）/ 抓拍（连续确认后停转再对焦拍）。
  * 相册支持多选删除、多选导出到 Pictures/PP360。
+ * 横竖屏自适应：预览方向、JPEG 方向、画面比例都跟着屏幕走。
  */
 public class ShootActivity extends Activity {
 
@@ -101,6 +104,10 @@ public class ShootActivity extends Activity {
     private boolean running = false;
     private boolean photoBusy = false;
     private boolean panoCollect = false;
+    private boolean mySpin = false;
+    private long trackStartTs = 0;
+    private String camInfo = "";
+    private LinearLayout topBar, bottomBar, snapRowRef, lastRowRef;
     private final List<String> panoPaths = new ArrayList<String>();
 
     /* ====================== 生命周期 ====================== */
@@ -137,6 +144,86 @@ public class ShootActivity extends Activity {
             cam = null;
         }
         super.onPause();
+    }
+
+    /** 横竖屏切换：不重建界面，只重新算预览方向与比例 */
+    @Override
+    public void onConfigurationChanged(Configuration cfg) {
+        super.onConfigurationChanged(cfg);
+        if (cam != null) {
+            cam.applyOrientation();
+        }
+        updateCamHud();
+        applyPreviewAspect();
+        applyChrome();
+        if (grid != null) {
+            grid.setNumColumns(cfg.orientation == Configuration.ORIENTATION_LANDSCAPE ? 5 : 3);
+        }
+        if (overlay != null) {
+            overlay.invalidate();
+        }
+    }
+
+    private boolean isLandscape() {
+        return getResources().getConfiguration().orientation
+                == Configuration.ORIENTATION_LANDSCAPE;
+    }
+
+    private void updateCamHud() {
+        if (tvTop == null || camInfo.length() == 0) {
+            return;
+        }
+        tvTop.setText(camInfo + " · " + (isLandscape() ? "横屏" : "竖屏"));
+        tvTop.setTextColor(C_BLUE);
+    }
+
+    /** 让预览画面按真实比例居中裁满，避免横竖屏时被压扁 */
+    private void applyPreviewAspect() {
+        if (tex == null || cam == null) {
+            return;
+        }
+        final int vw = tex.getWidth();
+        final int vh = tex.getHeight();
+        if (vw <= 0 || vh <= 0) {
+            return;
+        }
+        int pw = cam.width();
+        int ph = cam.height();
+        if (pw <= 0 || ph <= 0) {
+            return;
+        }
+        int deg = cam.displayOrientation();
+        int dw = (deg % 180 == 0) ? pw : ph;
+        int dh = (deg % 180 == 0) ? ph : pw;
+        float viewR = (float) vw / vh;
+        float bufR = (float) dw / dh;
+        float sx = 1f;
+        float sy = 1f;
+        if (bufR > viewR) {
+            sx = bufR / viewR;
+        } else {
+            sy = viewR / bufR;
+        }
+        Matrix m = new Matrix();
+        m.setScale(sx, sy, vw / 2f, vh / 2f);
+        try {
+            tex.setTransform(m);
+        } catch (Exception ignored) {
+        }
+    }
+
+    /** 横屏时压缩上下栏，把画面让给取景 */
+    private void applyChrome() {
+        boolean land = isLandscape();
+        if (topBar != null) {
+            topBar.setPadding(dp(16), land ? dp(8) : dp(14), dp(16), land ? dp(8) : dp(12));
+        }
+        if (bottomBar != null) {
+            bottomBar.setPadding(dp(18), land ? dp(5) : dp(10), dp(18), land ? dp(7) : dp(16));
+        }
+        if (lastRowRef != null) {
+            lastRowRef.setVisibility(land ? View.GONE : View.VISIBLE);
+        }
     }
 
     @Override
@@ -324,6 +411,7 @@ public class ShootActivity extends Activity {
             }
         });
         top.addView(tvParam);
+        topBar = top;
 
         LinearLayout bottom = new LinearLayout(this);
         bottom.setOrientation(LinearLayout.VERTICAL);
@@ -408,11 +496,15 @@ public class ShootActivity extends Activity {
         });
         lastRow.addView(tvLast);
         bottom.addView(lastRow);
+        bottomBar = bottom;
+        snapRowRef = snapRow;
+        lastRowRef = lastRow;
 
         buildGallery(root);
 
         setMode(MODE_SHOT);
         refreshRun();
+        applyChrome();
     }
 
     /* ====================== 相册层 ====================== */
@@ -467,7 +559,7 @@ public class ShootActivity extends Activity {
         col.addView(bar);
 
         grid = new GridView(this);
-        grid.setNumColumns(3);
+        grid.setNumColumns(isLandscape() ? 5 : 3);
         grid.setHorizontalSpacing(dp(6));
         grid.setVerticalSpacing(dp(6));
         grid.setPadding(dp(8), dp(8), dp(8), dp(8));
@@ -818,13 +910,12 @@ public class ShootActivity extends Activity {
         stitchPano(fs);
     }
 
-    /** 每张取中间 34% 宽，按拍摄顺序横向排成一张 360° 展开图 */
+    /** 每张取中间一段宽（竖屏 34%、横屏 40%），按拍摄顺序横向排成一张 360° 展开图 */
     private void stitchPano(List<File> files) {
         int n = files.size();
         Bitmap[] src = new Bitmap[n];
-        int h = 0;
         for (int i = 0; i < n; i++) {
-            src[i] = decode(files.get(i), 640);
+            src[i] = decode(files.get(i), 960);
             if (src[i] == null) {
                 toast("拼接失败：有一张读不出");
                 for (int k = 0; k <= i; k++) {
@@ -834,11 +925,20 @@ public class ShootActivity extends Activity {
                 }
                 return;
             }
-            if (h == 0) {
-                h = src[i].getHeight();
+        }
+        int h = src[0].getHeight();
+        for (int i = 1; i < n; i++) {
+            if (src[i].getHeight() != h) {
+                int nw = Math.max(8, src[i].getWidth() * h / src[i].getHeight());
+                Bitmap scaled = Bitmap.createScaledBitmap(src[i], nw, h, true);
+                if (scaled != src[i]) {
+                    src[i].recycle();
+                    src[i] = scaled;
+                }
             }
         }
-        int slice = Math.max(24, src[0].getWidth() * 34 / 100);
+        int pct = isLandscape() ? 40 : 34;
+        int slice = Math.max(24, src[0].getWidth() * pct / 100);
         int total = slice * n;
         Bitmap out;
         try {
@@ -975,9 +1075,9 @@ public class ShootActivity extends Activity {
             tvParam.setText("每 " + (intervalMs / 1000) + " 秒 1 张 · 共 " + plan
                     + " 张 · 每张后云台正转一格（点此切换参数）");
         } else if (m == MODE_PANO) {
-            tvParam.setText("云台正转一圈 18 格 · 拍完自动拼成一张全景");
+            tvParam.setText("云台正转一圈 18 格 · 拍完自动拼成一张展开图（横屏拼得更宽）");
         } else {
-            tvParam.setText("云台巡转 · 人脸在中心框连续确认 3 次后停转拍摄");
+            tvParam.setText("云台巡转 · 人脸进中心框连续 3 帧即停转，稳定后自动对焦拍摄（60 秒兜底）");
         }
         if (cam != null) {
             cam.faceOn(m == MODE_TRACK);
@@ -1014,6 +1114,10 @@ public class ShootActivity extends Activity {
         }
         if (photoBusy) {
             return;
+        }
+        if (mySpin) {
+            MainActivity.shootSpin(false);
+            mySpin = false;
         }
         photoBusy = true;
         cam.shoot(tag);
@@ -1058,7 +1162,9 @@ public class ShootActivity extends Activity {
             cam.faceOn(true);
             overlay.setFaceReady(true);
             MainActivity.shootSpin(true);
-            tvHint.setText("巡转中，找人脸…");
+            mySpin = true;
+            trackStartTs = System.currentTimeMillis();
+            tvHint.setText("巡转中，找人脸…（60 秒没找到会自动停）");
             tvHint.setTextColor(C_GOLD);
         }
     }
@@ -1066,9 +1172,11 @@ public class ShootActivity extends Activity {
     private void stopRun() {
         boolean was = running;
         running = false;
+        trackStartTs = 0;
         refreshRun();
         if (was && mode == MODE_TRACK) {
             MainActivity.shootSpin(false);
+            mySpin = false;
         }
     }
 
@@ -1160,9 +1268,17 @@ public class ShootActivity extends Activity {
 
         @Override
         public void camReady(int w, int h) {
-            tvTop.setText("相机就绪  " + w + "×" + h);
-            tvTop.setTextColor(C_BLUE);
+            camInfo = "相机就绪  " + w + "×" + h;
+            updateCamHud();
             overlay.setReady(true);
+            if (tex != null) {
+                tex.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        applyPreviewAspect();
+                    }
+                });
+            }
             if (mode == MODE_TRACK && cam != null) {
                 cam.faceOn(true);
                 overlay.setFaceReady(true);
@@ -1206,11 +1322,38 @@ public class ShootActivity extends Activity {
 
         @Override
         public void camFace(float nx, float ny, int size) {
-            overlay.setFace(nx, ny);
+            /* 检测坐标在传感器坐标系（横向），按当前预览旋转角映射到屏幕坐标 */
+            float vx;
+            float vy;
+            int deg = cam != null ? cam.displayOrientation() : 90;
+            if (deg == 90) {
+                vx = ny;
+                vy = nx;
+            } else if (deg == 180) {
+                vx = -ny;
+                vy = -nx;
+            } else if (deg == 270) {
+                vx = nx;
+                vy = -ny;
+            } else {
+                vx = -nx;
+                vy = ny;
+            }
+            overlay.setFaceView(vx, vy);
             if (!running || mode != MODE_TRACK) {
                 return;
             }
-            boolean center = Math.abs(nx) < 0.10f && Math.abs(ny) < 0.12f && size >= 9;
+            if (trackStartTs > 0 && System.currentTimeMillis() - trackStartTs > 60000) {
+                trackStartTs = 0;
+                running = false;
+                refreshRun();
+                MainActivity.shootSpin(false);
+                mySpin = false;
+                tvHint.setText("转了一圈多还没找到人脸，已自动停止");
+                tvHint.setTextColor(C_DIM);
+                return;
+            }
+            boolean center = Math.abs(vx) < 0.14f && Math.abs(vy) < 0.16f && size >= 8;
             if (center) {
                 hitStreak++;
                 tvHint.setText("锁定中 " + hitStreak + " / " + HIT_NEED);
@@ -1218,6 +1361,7 @@ public class ShootActivity extends Activity {
                 if (hitStreak >= HIT_NEED) {
                     hitStreak = 0;
                     MainActivity.shootSpin(false);
+                    mySpin = false;
                     tvHint.setText("已停转，对焦拍摄…");
                     ui.postDelayed(new Runnable() {
                         @Override
@@ -1230,7 +1374,7 @@ public class ShootActivity extends Activity {
                 }
             } else {
                 hitStreak = 0;
-                if (size > 0 && size < 9) {
+                if (size > 0 && size < 8) {
                     tvHint.setText("人脸太小，走近一点");
                     tvHint.setTextColor(C_DIM);
                 } else {
@@ -1251,8 +1395,8 @@ public class ShootActivity extends Activity {
         private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
         private boolean ready = false;
         private boolean faceReady = false;
-        private float nx = 2f;
-        private float ny = 2f;
+        private float vx = 2f;
+        private float vy = 2f;
         private long ts = 0;
 
         Overlay(Context c) {
@@ -1269,9 +1413,10 @@ public class ShootActivity extends Activity {
             invalidate();
         }
 
-        void setFace(float x, float y) {
-            nx = x;
-            ny = y;
+        /** vx、vy 为映射到屏幕后的归一化坐标（-0.5~0.5，vx 向右、vy 向下） */
+        void setFaceView(float x, float y) {
+            vx = x;
+            vy = y;
             ts = System.currentTimeMillis();
             invalidate();
         }
@@ -1309,7 +1454,7 @@ public class ShootActivity extends Activity {
                 return;
             }
             boolean fresh = System.currentTimeMillis() - ts < 1600;
-            boolean hit = fresh && Math.abs(nx) < 0.10f && Math.abs(ny) < 0.12f;
+            boolean hit = fresh && Math.abs(vx) < 0.12f && Math.abs(vy) < 0.14f;
             int cx = w / 2;
             int cy = h / 2;
             int bw = dp(84);
@@ -1319,8 +1464,8 @@ public class ShootActivity extends Activity {
             p.setColor(hit ? C_GOLD : 0x40FFFFFF);
             c.drawRect(cx - bw / 2, cy - bh / 2, cx + bw / 2, cy + bh / 2, p);
             if (fresh) {
-                float fx = cx + ny * w;
-                float fy = cy + nx * h;
+                float fx = cx + vx * w;
+                float fy = cy + vy * h;
                 p.setStyle(Paint.Style.FILL);
                 p.setColor(C_GOLD);
                 c.drawCircle(clamp(fx, dp(6), w - dp(6)), clamp(fy, dp(6), h - dp(6)), dp(4f), p);
