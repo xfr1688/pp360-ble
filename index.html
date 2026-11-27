@@ -250,7 +250,7 @@
         <input id="rawIn" value="11 01 55 01 02 02 00 01 11 88 88 88 00 00 00 0D 0A">
         <button id="btnRaw">发送</button>
       </div>
-      </div>
+    </div>
   </details>
 
   <footer>
@@ -578,7 +578,7 @@ document.querySelectorAll(".grid4 button[data-deg]").forEach(btn=>{
     steps(n===0?RING:n, {label:`转到 ${deg}°`});
   };
 });
-$(\"btnStop\").onclick = async ()=>{
+$("btnStop").onclick = async ()=>{
   if(!S.w && !S.demo){ toast("还没连上"); return; }
   if(S.demo){ toast("演示模式无需停止"); return; }
   if(!S.spin){ toast("当前已是停止状态，未发送（若仍在转，点上方「停止旋转」）"); return; }
