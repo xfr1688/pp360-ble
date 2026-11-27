@@ -23,6 +23,7 @@ import android.content.pm.PackageManager;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
+import android.widget.Toast;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -45,6 +46,8 @@ public class BleLink {
 
     public static final int CMD_STEP = 0x02;
     public static final int CMD_SPIN = 0x06;
+
+    private static final int SCAN_MS = 15000;
 
     private static final byte[] BASE = new byte[]{
             0x11, 0x01, 0x55, 0x01, 0x02, 0x00, 0x00, 0x00, 0x11,
@@ -126,6 +129,15 @@ public class BleLink {
         });
     }
 
+    private void pToast(final String m) {
+        ui.post(new Runnable() {
+            @Override
+            public void run() {
+                Toast.makeText(activity, m, Toast.LENGTH_SHORT).show();
+            }
+        });
+    }
+
     public boolean isSupported() {
         return mAdapter != null;
     }
@@ -138,6 +150,31 @@ public class BleLink {
         return safeName(mDevice);
     }
 
+    /* ---------------- 诊断 ---------------- */
+    private String diag() {
+        StringBuilder sb = new StringBuilder();
+        sb.append("诊断 SDK ").append(Build.VERSION.SDK_INT);
+        sb.append(" · 蓝牙 ").append((mAdapter != null && mAdapter.isEnabled()) ? "开" : "关");
+        try {
+            sb.append(" · 已配对 ").append(mAdapter.getBondedDevices().size()).append(" 个");
+        } catch (Exception e) {
+            sb.append(" · 已配对读不到(无 CONNECT 权限)");
+        }
+        try {
+            boolean loc = activity.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)
+                    == PackageManager.PERMISSION_GRANTED;
+            sb.append(" · 位置权限 ").append(loc ? "有" : "无");
+        } catch (Exception ignored) {
+        }
+        try {
+            boolean scan = activity.checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN)
+                    == PackageManager.PERMISSION_GRANTED;
+            sb.append(" · 扫描权限 ").append(scan ? "有" : "无");
+        } catch (Exception ignored) {
+        }
+        return sb.toString();
+    }
+
     /* ---------------- 扫描 ---------------- */
     public void scan() {
         if (mAdapter == null) {
@@ -146,6 +183,7 @@ public class BleLink {
         }
         if (!mAdapter.isEnabled()) {
             pLog("蓝牙没开，先打开蓝牙");
+            pToast("先打开手机蓝牙");
             try {
                 activity.startActivity(new Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE));
             } catch (Exception ignored) {
@@ -185,7 +223,8 @@ public class BleLink {
         if (all) {
             startScan();
         } else {
-            pLog("权限被拒绝，扫不了");
+            pLog("权限被拒绝，扫不了。请到系统设置 → 应用 → 拍拍360 里手动打开『附近设备』");
+            pToast("权限被拒，去设置里手动开");
             pState("未连接");
         }
     }
@@ -203,8 +242,9 @@ public class BleLink {
         found.clear();
         names.clear();
         scanning = true;
-        pState("扫描中…最多 10 秒");
-        pLog("开始扫描 BLE 设备");
+        pState("扫描中…先按云台电源键");
+        pLog("开始扫描 BLE 设备，共 " + (SCAN_MS / 1000) + " 秒");
+        pLog(diag());
         ScanSettings st = new ScanSettings.Builder()
                 .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
                 .build();
@@ -221,7 +261,7 @@ public class BleLink {
             public void run() {
                 stopAndPick();
             }
-        }, 10000);
+        }, SCAN_MS);
     }
 
     private final ScanCallback scanCb = new ScanCallback() {
@@ -249,7 +289,8 @@ public class BleLink {
         @Override
         public void onScanFailed(int errorCode) {
             scanning = false;
-            pLog("扫描失败 errorCode=" + errorCode);
+            pLog("扫描失败 errorCode=" + errorCode + "（1=太频繁，2=无法开始，3=内部错误，4=被系统限制）");
+            pState("未连接");
         }
     };
 
@@ -266,8 +307,16 @@ public class BleLink {
         }
 
         if (found.isEmpty()) {
-            pLog("扫描结束：0 个设备。先短按云台电源键（灯亮），10 秒内再扫");
+            pLog("扫描结束：0 个设备");
+            pLog(diag());
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                pLog("Android 12+：确认已允许『附近设备』（含扫描/连接）；小米、华为等机型还要求把『定位服务』总开关打开");
+            } else {
+                pLog("Android 11 及以下：扫 BLE 必须打开『定位服务』总开关并允许位置权限");
+            }
+            pLog("云台闲置约 1 分钟就停广播：短按电源键让灯亮，趁亮着再点连接");
             pState("未连接");
+            pToast("没扫到：先按电源键亮灯，并检查定位开关");
             return;
         }
 
