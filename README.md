@@ -1,0 +1,164 @@
+# pp360-ble
+
+**拍拍360（TL-6A / TL-6B / TL-6C）蓝牙云台，网页直控 + 命令行控制。**
+
+官方 App `com.deepai.paipai` 已下架，设备变成一块废铁。本项目把它的 BLE 协议逆向出来，用浏览器或一行命令就能让云台按 20° 一步步转，不再依赖任何 App。
+
+> Pure reverse engineering from the official APK's `classes43.dex`. No third-party code, no SDK, no app dependency. Works on any BLE-capable browser.
+
+- 单文件网页，无依赖、无构建、无服务器
+- 安卓 Chrome / 桌面 Chrome、Edge 直接打开即用
+- 每步 20°，18 步一整圈，设备到位会"叫一声"
+- 附带 Python CLI，方便批量/脚本调用
+- 协议全文档化，方便二次开发（ESP32、树莓派等）
+
+---
+
+## 快速开始
+
+### 方式一：网页（推荐）
+
+1. 用**桌面 Chrome / Edge**，或**安卓 Chrome** 打开 `index.html`
+2. 云台短按电源键开机，指示灯亮起
+3. 点「连接云台」，在弹窗里选中 `TL-6C` 之类的设备
+4. 用「进一步 / 一圈 / 转到 90°」操作
+
+> iOS 的 Safari 不支持 Web Bluetooth，iPhone 上用不了网页版，请改用 Python 或 Bluefy 这类浏览器。
+
+没有蓝牙设备也能点「演示模式」看界面动效。
+
+### 方式二：命令行
+
+```bash
+pip install bleak
+
+python python/pp360_ctl.py scan      # ★ 标记的就是云台
+python python/pp360_ctl.py step 3    # 走 3 步 = 60°
+python python/pp360_ctl.py circle    # 整圈
+python python/pp360_ctl.py deg 90    # 转到 90°
+python python/pp360_ctl.py stop
+```
+
+设备地址自动发现，也可以 `--addr` 指定。
+
+---
+
+## 兼容性
+
+| 型号 | 直径 | 状态 |
+|---|---|---|
+| TL-6A | 60 mm | 协议一致，未实测 |
+| TL-6B | 80 mm | 协议一致，未实测 |
+| TL-6C | 110 mm | ✅ 已在实机（FW V3.9）验证 |
+
+判断方法：蓝牙广播名以 `TL-` 开头，或服务里含 `00001910-...`。
+
+---
+
+## 协议速查
+
+### GATT
+
+| 用途 | UUID |
+|---|---|
+| 服务 | `00001910-0000-1000-8000-00805f9b34fb` |
+| 写（→ 云台） | `0000fff1-0000-1000-8000-00805f9b34fb` |
+| 通知（云台 →） | `0000fff4-0000-1000-8000-00805f9b34fb` |
+| 其他 | `fff2`(read) `fff3`(write-no-resp) `fff5`(read) |
+
+无需配对、无握手、无校验、无加密。
+
+### 命令帧（17 字节）
+
+```
+11 01 55 01 02 00 00 00 11 88 88 88 00 00 00 0D 0A
+             ↑  ↑  ↑
+           cmd speed refresh
+```
+
+| 偏移 | 含义 |
+|---|---|
+| 0 | 0x11 帧长 |
+| 5 | 命令 |
+| 6 | 档位（0 = 18 张 / 20°，1 = 36 张，2 = 72 张） |
+| 7 | 刷新：启动类填 1，停止/复位填 0 |
+
+| cmd | 含义 | TL-6C 实测 |
+|---|---|---|
+| `0x02` | **转一步** | ✅ 执行 + 回帧 + 蜂鸣 |
+| `0x01` | 拍照模式转 | ⚠️ 无动作、无回帧 |
+| `0x04` / `0x05` | 复位 | ⚠️ 无动作、无回帧 |
+| `0x0E` | 停止 | 写入有效，不回帧 |
+| `0x0F` | 心跳/状态 | 无回帧 |
+
+### 应答帧
+
+```
+11 02 17 17 06 02 00 01 11 88 00 88 00 00 00 0D 0A
+```
+
+- byte1 = `0x02` 表示应答
+- byte2 = 全局步数计数器，跨连接累加
+- byte10 = 圈内档位序号 `0x00`–`0x11`（0–17）
+
+### 时序（关键）
+
+1. 发一帧 → 设备开始转 → 约 **0.9 s** 后到位 → 回一帧 + 蜂鸣
+2. **必须等应答再发下一帧**，否则新帧会被吞
+3. 写入用 Write Request（带响应）
+4. 18 步连发 = 精确一圈 360°
+
+---
+
+## 逆向过程
+
+1. 从失效的应用商店页拿到包名 `com.deepai.paipai`，经第三方镜像下载原厂签名 APK（签名 `O=deepai`，序列号与有效期均指向原厂）
+2. `baksmali` 反编译 42 个 dex，定位到唯一含 BLE 代码的 `classes43.dex`
+3. 读 `ble/MyBle.smali`、`ble/MyReadSend.smali`、`bledevice/DeviceMsg.smali`、`bledevice/GattAttributes.smali`，还原出 UUID、17 字节帧、命令表、应答解析、100ms 发送节流
+4. 用 `bleak` 在真机上逐条验证：确认服务 `1910`、确认 `0x02` 是单步、确认 18 步闭环、确认 `speed=1/2` 无效、确认 `0x01/0x04` 不执行
+
+详细记录见 [`PROTOCOL.md`](PROTOCOL.md)。
+
+---
+
+## 已知限制
+
+- **只有 20° 一档**：`speed=1/2`（10°/5°）在这台固件上完全被忽略，15 秒内无动作无应答
+- **只能单向转**，回退一步 = 正向走 17 步（网页里已标出，约 16 秒）
+- **无法读取绝对位置**：设备不存储绝对角度，回帧里的序号只在本轮有效
+- 闲置约 1 分钟后自动休眠，需短按电源键唤醒
+- 拍照本身走手机相机，不经过蓝牙；本项目只做转台控制
+
+---
+
+## 发布到 GitHub
+
+```bash
+git init && git add . && git commit -m "feat: pp360 BLE controller"
+git branch -M main
+git remote add origin https://github.com/<你的账号>/pp360-ble.git
+git push -u origin main
+```
+
+推上去后到仓库 **Settings → Pages → Source 选 GitHub Actions**，仓库自带的 `.github/workflows/pages.yml` 会自动把 `index.html` 发布成网页，手机扫码就能用。
+
+---
+
+## 目录
+
+```
+index.html              网页控制器（单文件，可直接双击打开）
+python/pp360_ctl.py     命令行控制器
+PROTOCOL.md             完整协议文档
+LICENSE                 MIT
+```
+
+---
+
+## 免责声明
+
+本项目仅用于自己手里的设备复活与学习研究，与设备厂商、App 开发者无关。请勿用于商业破解或批量改装。刷机、拆机、长时间连续转动造成的任何损坏由使用者自行承担。
+
+## License
+
+MIT
