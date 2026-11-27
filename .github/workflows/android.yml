@@ -79,10 +79,11 @@ jobs:
             ver="${pair##*:}"
             echo "=== rebuild v$ver from $sha ===" >> publish.log
             git checkout -f "$sha" >> rebuild.log 2>&1
-            ( cd android && gradle :app:assembleDebug --no-daemon --stacktrace ) >> rebuild.log 2>&1
+            rm -rf android/app/build android/.gradle
+            ( cd android && gradle clean :app:assembleDebug --no-daemon --stacktrace ) >> rebuild.log 2>&1
             if [ -f android/app/build/outputs/apk/debug/app-debug.apk ]; then
               cp android/app/build/outputs/apk/debug/app-debug.apk "out/pp360-ble-v$ver.apk"
-              echo "v$ver build ok" >> publish.log
+              echo "v$ver build ok size=$(stat -c%s out/pp360-ble-v$ver.apk)" >> publish.log
             else
               echo "v$ver build failed" >> publish.log
             fi
