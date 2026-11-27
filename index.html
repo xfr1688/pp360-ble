@@ -96,6 +96,17 @@
   .meta span{display:block;font-size:10px;color:var(--dim);letter-spacing:.05em;margin-bottom:3px}
   .meta b{font-size:12px;font-weight:500;font-variant-numeric:tabular-nums;white-space:nowrap}
 
+  /* ---------- 连续模式测试 ---------- */
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:14px 15px}
+  .panel-h{display:flex;justify-content:space-between;align-items:center;gap:8px;
+    font-size:13px;font-weight:600;margin-bottom:8px}
+  .panel-h span{font-size:11px;font-weight:400;color:var(--dim);font-variant-numeric:tabular-nums}
+  .panel-h span.live{color:var(--gold)}
+  .tests{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:6px}
+  .tests button{padding:10px 4px;font-size:12px;line-height:1.25;border-radius:11px}
+  .tests button small{display:block;font-size:9.5px;color:var(--dim);margin-top:3px}
+  .tests button.warn{border-color:#3b3020;color:#e3b871}
+
   /* ---------- 折叠区 ---------- */
   details{margin-top:14px;background:var(--panel);border:1px solid var(--line);border-radius:16px;overflow:hidden}
   details>summary{
@@ -182,7 +193,13 @@
       <button data-deg="90">90°<small>4 步</small></button>
       <button data-deg="180">180°<small>9 步</small></button>
       <button data-deg="360">一圈<small>18 步</small></button>
-      <button class="danger" id="btnStop">停止<small>0x0E</small></button>
+      <button class="danger" id="btnStop">停止<small>0x06 翻转</small></button>
+    </div>
+
+    <!-- 连续旋转 -->
+    <div class="row">
+      <button class="stepbtn primary" id="btnSpin"><b>◉ 连续旋转</b><em>0x06 · 一直转</em></button>
+      <button class="stepbtn ghost" id="btnSpinStop"><b>■ 停</b><em>0x06 翻转</em></button>
     </div>
 
     <!-- 自定义 -->
@@ -199,8 +216,23 @@
 
     <div class="row">
       <button class="primary" id="btnConn">连接云台</button>
+      <button class="ghost" id="btnDisc">断开</button>
       <button class="ghost" id="btnDemo">演示模式</button>
     </div>
+    <div style="font-size:11px;color:var(--dim);margin-top:8px;line-height:1.7">
+      ① 短按云台电源键（灯亮）→ ② 10 秒内点「连接云台」→ ③ 弹窗里选 <b style="color:var(--gold)">TL-6C</b><br>
+      云台闲置约 1 分钟会停止广播，扫不到就再按一次电源键。
+    </div>
+  </div>
+
+  <!-- 连续模式测试 -->
+  <div class="panel" style="margin-top:14px">
+    <div class="panel-h">命令号扫描 <span id="probeStatus">空闲</span></div>
+    <div style="font-size:11.5px;color:var(--dim);line-height:1.65;margin-bottom:6px">
+      点一个 → 只发这一帧 → 观察 4 秒。每次只测一个，把现象告诉我。
+    </div>
+    <div class="tests" id="probeGrid"></div>
+    <div class="row"><button class="danger" id="btnProbeStop">停止旋转（0x06）</button></div>
   </div>
 
   <details>
@@ -212,13 +244,13 @@
     <summary>高级 · 原始帧</summary>
     <div class="body">
       <div style="font-size:12px;color:var(--dim);margin-bottom:8px">
-        17 字节，写特征 fff1。命令位为第 6 个字节：02 转一步 / 0E 停止 / 01 拍照转 / 04 复位。
+        17 字节，写特征 fff1。命令位是第 6 个字节：02 转一步（20°）/ 06 连续旋转开关 / 0E 停止（本机无效）。
       </div>
       <div class="rawrow">
         <input id="rawIn" value="11 01 55 01 02 02 00 01 11 88 88 88 00 00 00 0D 0A">
         <button id="btnRaw">发送</button>
       </div>
-    </div>
+      </div>
   </details>
 
   <footer>
@@ -253,7 +285,9 @@ const S = {
   demo:false,
   sent:0,
   stepMs:0,
-  pendingAck:null
+  pendingAck:null,
+  busyTimer:null,
+  spin:false,
 };
 
 const $ = id => document.getElementById(id);
@@ -334,23 +368,43 @@ function attachNotify(ch){
     // 应答帧：11 02 NN 17 06 02 00 01 11 88 MM 88 ...
     if(b.length >= 12 && b[1] === 0x02){
       // b[10] 是设备自己的“第几张”序号，只作参考；位置由本地步数累计
+      if(S.probing) S.probeAcks++;
       if(S.pendingAck){ const p=S.pendingAck; S.pendingAck=null; p(true); }
     }
   });
 }
 
+async function requestAnyDevice(){
+  const tries = [
+    { filters:[{ namePrefix:"TL-" }],  optionalServices: OPT_SVC },
+    { filters:[{ services:[SVC] }],   optionalServices: OPT_SVC },
+    { acceptAllDevices:true,          optionalServices: OPT_SVC }
+  ];
+  let lastErr = null;
+  for(const opt of tries){
+    try{ return await navigator.bluetooth.requestDevice(opt); }
+    catch(e){
+      lastErr = e;
+      if(e.name === "NotFoundError"){
+        log("这一轮没扫到云台，放宽条件再扫一次…","e");
+        continue;
+      }
+      throw e;
+    }
+  }
+  throw lastErr || new Error("没有选中设备");
+}
+
 async function connect(){
   if(!navigator.bluetooth){
     toast("此浏览器不支持 Web Bluetooth");
-    log("navigator.bluetooth 不存在：请用安卓 Chrome / 桌面 Chrome、Edge，iOS 不支持。","e");
+    log("navigator.bluetooth 不存在：请用安卓 Chrome / 桌面 Chrome、Edge，iOS 与鸿蒙自带浏览器不支持。","e");
     return;
   }
   $("btnConn").disabled = true;
   setConn("busy","连接中…");
   try{
-    S.dev = await navigator.bluetooth.requestDevice({
-      acceptAllDevices:true, optionalServices: OPT_SVC
-    });
+    S.dev = await requestAnyDevice();
     log("选中设备：" + (S.dev.name||"(无名)") + "  " + S.dev.id);
     S.dev.addEventListener("gattserverdisconnected", ()=>{
       setConn("", "已断开"); S.w=null; S.n=null;
@@ -375,11 +429,18 @@ async function connect(){
       setConn("","连接失败"); $("btnConn").disabled=false; return;
     }
     log("写特征 fff1 ✅" + (S.n ? " · 通知 fff4 ✅" : " · 通知 fff4 ✗"), "g");
+    log(`属性：write=${!!S.w.properties.write} writeNoResp=${!!S.w.properties.writeWithoutResponse}` +
+        (S.n ? ` notify=${!!S.n.properties.notify} indicate=${!!S.n.properties.indicate}` : ""));
     log("位置按 0° 起算（设备不保存绝对角度，界面角度以本次会话为准）");
 
     if(S.n){
-      await S.n.startNotifications();
-      attachNotify(S.n);
+      try{
+        await S.n.startNotifications();
+        attachNotify(S.n);
+        log("通知已开启，等设备回包","g");
+      }catch(e){
+        log("开通知失败：" + (e.message||e) + "（将自动走定时模式）","e");
+      }
     }
     setConn("on", S.dev.name || "TL-6C");
     $("mDev").textContent = S.dev.name || "TL-6C";
@@ -387,7 +448,17 @@ async function connect(){
     $("btnConn").disabled = false;
     toast("已连接 " + (S.dev.name||""));
   }catch(e){
-    log("连接失败：" + e.message, "e");
+    const n = e.name || "";
+    if(n === "NotFoundError"){
+      log("扫不到设备：云台多半已经休眠（停止广播）。按一下电源键，灯亮后 10 秒内再点连接。","e");
+      toast("扫不到云台，先短按电源键再连");
+    }else if(n === "SecurityError"){
+      log("被浏览器策略拦了：检查 edge://settings/content/bluetoothChooser 是否禁止了蓝牙。","e");
+      toast("浏览器权限拦了蓝牙");
+    }else{
+      log("连接失败：" + (e.message || n), "e");
+      toast("连接失败：" + (e.message || n));
+    }
     setConn("", "未连接");
     $("btnConn").disabled = false;
   }
@@ -414,6 +485,9 @@ function advance(k){
   S.pos = r % RING;
 }
 
+/* 自动展开日志，出错时不用用户自己找 */
+function openLog(){ try{ document.querySelectorAll("details")[0].open = true; }catch(e){} }
+
 /* 走出 n 步（带应答节流） */
 async function steps(n,{label="",silent=false}={}){
   if(S.busy){ toast("正在执行，稍等"); return; }
@@ -421,13 +495,25 @@ async function steps(n,{label="",silent=false}={}){
   n = Math.max(0, Math.min(400, n|0));
   if(n === 0){ toast("已经在目标位置"); return; }
 
+  if(S.spin){ try{ await write(frame(0x06,0,1)); }catch(e){} S.spin=false; paintSpin(); log("先停掉连续旋转","a"); }
+
   S.busy = true;
   $("btnOne").disabled = $("btnBack").disabled = true;
   document.querySelectorAll(".grid4 button").forEach(b=>b.disabled=true);
   setConn("busy", S.demo?"演示中…":"执行中…");
   log(`→ ${label||"步进"}：${n} 步（${n*STEP_DEG}°），预计 ${(n*0.95).toFixed(0)}s`);
 
-  let ok=0;
+  // 看门狗：万一流程卡住，自动解锁按钮，避免整页按钮全死
+  clearTimeout(S.busyTimer);
+  S.busyTimer = setTimeout(()=>{
+    if(!S.busy) return;
+    S.busy = false;
+    $("btnOne").disabled = $("btnBack").disabled = false;
+    document.querySelectorAll(".grid4 button").forEach(b=>b.disabled=false);
+    log("流程超时，已自动解锁按钮","e"); openLog();
+  }, (n*1.6 + 20) * 1000);
+
+  let ok=0, blind=false;
   for(let i=0;i<n;i++){
     if(S.demo){
       await new Promise(r=>setTimeout(r,900));
@@ -438,23 +524,37 @@ async function steps(n,{label="",silent=false}={}){
     try{
       const t0 = performance.now();
       await write(frame(CMD.step,0,1));
-      const got = await waitAck(3000);
-      const dt = Math.round(performance.now()-t0);
-      if(got){ ok++; S.sent++; S.stepMs = dt; advance(1); }
-      else { log(`  第 ${i+1} 步 3s 未应答（可能卡住或休眠）`,"e"); }
+      let got = false;
+      if(!blind){
+        got = await waitAck(1400);
+        if(!got){
+          blind = true;
+          log("这一步没收到应答（通知可能没生效），改走定时模式：每步固定 1.0s 间隔，照常转","e"); openLog();
+          toast("已切换定时模式");
+        }
+      }
+      ok++; S.sent++; advance(1);
+      if(blind){
+        S.stepMs = 1000;
+        await new Promise(r=>setTimeout(r,1000));
+      }else{
+        S.stepMs = Math.round(performance.now()-t0);
+      }
     }catch(e){
-      log("写入失败：" + e.message, "e"); break;
+      log("写入失败：" + (e.message||e), "e"); openLog(); break;
     }
-    await new Promise(r=>setTimeout(r,120));
+    if(!blind) await new Promise(r=>setTimeout(r,120));
     render();
   }
 
-  if(!S.demo && S.w){ try{ await write(frame(CMD.stop,0,0)); }catch(e){} }
-  log(`=== ${label||"步进"}完成：${ok}/${n} 步到位 ===`, ok===n?"g":"e");
+  if(!S.demo && S.w){ /* 0x0E 对本机无效，步进结束后不发停止帧 */ }
+  log(`=== ${label||"步进"}结束：${ok}/${n} 步已发送 ===`, ok===n?"g":"e");
+  clearTimeout(S.busyTimer);
   S.busy=false;
   $("btnOne").disabled = $("btnBack").disabled = false;
   document.querySelectorAll(".grid4 button").forEach(b=>b.disabled=false);
   setConn(S.w?"on":"", S.w?(S.dev.name||"TL-6C"):"未连接");
+  paintSpin();
   render();
 }
 
@@ -478,10 +578,15 @@ document.querySelectorAll(".grid4 button[data-deg]").forEach(btn=>{
     steps(n===0?RING:n, {label:`转到 ${deg}°`});
   };
 });
-$("btnStop").onclick = async ()=>{
+$(\"btnStop\").onclick = async ()=>{
   if(!S.w && !S.demo){ toast("还没连上"); return; }
   if(S.demo){ toast("演示模式无需停止"); return; }
-  try{ await write(frame(CMD.stop,0,0)); log("→ 停止 0x0E","a"); toast("已发送停止"); }
+  if(!S.spin){ toast("当前已是停止状态，未发送（若仍在转，点上方「停止旋转」）"); return; }
+  try{
+    await write(frame(0x06,0,1));
+    S.spin = false;
+    log("→ 停止：0x06 翻转（0x0E 对本机无效）","a"); toast("已发送停止"); paintSpin();
+  }
   catch(e){ log("停止失败："+e.message,"e"); }
 };
 $("btnGo").onclick = ()=>{
@@ -500,6 +605,21 @@ $("btnDemo").onclick = ()=>{
   setConn(S.demo?"busy":"", S.demo?"演示中":"未连接");
   log(S.demo ? "进入演示模式（不发蓝牙，仅演示交互）" : "退出演示模式","g");
 };
+$("btnDisc").onclick = async ()=>{
+  try{
+    if(S.dev && S.dev.gatt.connected){
+      S.dev.gatt.disconnect();
+      S.w=null; S.n=null; S.dev=null;
+      setConn("", "已断开");
+      $("btnConn").textContent = "连接云台";
+      $("btnConn").disabled = false;
+      log("已主动断开，蓝牙链路已释放","a");
+      toast("已断开");
+    }else{
+      toast("当前没连着");
+    }
+  }catch(e){ log("断开失败："+(e.message||e),"e"); }
+};
 $("btnRaw").onclick = async ()=>{
   if(!S.w){ toast("还没连上云台"); return; }
   const t = $("rawIn").value.replace(/[^0-9a-fA-F]/g,"");
@@ -510,8 +630,126 @@ $("btnRaw").onclick = async ()=>{
   catch(e){ log("RAW 发送失败："+e.message,"e"); }
 };
 
+/* ====================== 连续旋转 0x06（每发一次翻转状态） ====================== */
+function paintSpin(){
+  const b = $("btnSpin");
+  b.innerHTML = S.spin ? "<b>■ 停止旋转</b><em>再发一次 0x06</em>"
+                       : "<b>◉ 连续旋转</b><em>0x06 · 一直转</em>";
+  $("btnStop").disabled = !S.spin;
+  $("btnSpinStop").disabled = !S.spin;
+  setConn(S.spin ? "busy" : (S.w?"on":""), S.spin ? "连续旋转中…" : (S.w ? (S.dev.name||"TL-6C") : "未连接"));
+}
+
+async function spinToggle(){
+  if(!S.w){ toast("还没连上云台"); return; }
+  try{
+    await write(frame(0x06, 0, 1));
+    S.spin = !S.spin;
+    log(S.spin ? "→ 0x06 启动连续旋转" : "→ 0x06 停止连续旋转", "a");
+    toast(S.spin ? "连续旋转中，再点一次停" : "已停止");
+    paintSpin();
+  }catch(e){ log("写入失败：" + (e.message||e), "e"); }
+}
+
+$("btnSpin").onclick = spinToggle;
+
+$("btnSpinStop").onclick = async ()=>{
+  if(!S.w){ toast("还没连上"); return; }
+  if(!S.spin){ toast("当前已是停止状态，未发送"); return; }
+  try{
+    await write(frame(0x06, 0, 1));
+    S.spin = false;
+    log("→ 0x06 停止（0x0E 对本机无效，必须靠 0x06 翻转）", "a");
+    paintSpin();
+    toast("已发停止");
+  }catch(e){ log("停止失败：" + (e.message||e), "e"); }
+};
+
+/* ====================== 方向探测（单步 0x02） ====================== */
+const PROBE_SECS = 4;
+const PROBES = [
+  ["cmd 0C", "11 01 55 01 02 0C 00 01 11 88 88 88 00 00 00 0D 0A"],
+  ["cmd 0D", "11 01 55 01 02 0D 00 01 11 88 88 88 00 00 00 0D 0A"],
+  ["cmd 12", "11 01 55 01 02 12 00 01 11 88 88 88 00 00 00 0D 0A"],
+  ["cmd 13", "11 01 55 01 02 13 00 01 11 88 88 88 00 00 00 0D 0A"],
+  ["cmd 14", "11 01 55 01 02 14 00 01 11 88 88 88 00 00 00 0D 0A"],
+  ["cmd 15", "11 01 55 01 02 15 00 01 11 88 88 88 00 00 00 0D 0A"],
+  ["cmd 16", "11 01 55 01 02 16 00 01 11 88 88 88 00 00 00 0D 0A"],
+  ["cmd 17", "11 01 55 01 02 17 00 01 11 88 88 88 00 00 00 0D 0A"]
+];
+
+let probeTimer = null, probeDone = null;
+
+function parseHex(s){
+  const t = s.replace(/[^0-9a-fA-F]/g,"");
+  const a = new Uint8Array(t.length/2);
+  for(let i=0;i<a.length;i++) a[i] = parseInt(t.substr(i*2,2),16);
+  return a;
+}
+
+function buildProbes(){
+  const g = $("probeGrid");
+  PROBES.forEach(([label, hx])=>{
+    const b = document.createElement("button");
+    b.innerHTML = `${label}<small>${hx.split(" ").slice(3,6).join(" ")}</small>`;
+    b.onclick = ()=> probe(b, label, hx);
+    g.appendChild(b);
+  });
+}
+buildProbes();
+
+function probeFinish(){
+  if(probeTimer){ clearInterval(probeTimer); probeTimer=null; }
+  const d = probeDone; probeDone = null; if(d) d();
+}
+
+async function probe(btn, label, hx){
+  if(!S.w){ toast("还没连上云台"); return; }
+  if(S.probing){ toast("上一组还在观察，先按停止"); return; }
+  if(S.spin){ try{ await write(frame(0x06,0,1)); }catch(e){} S.spin=false; paintSpin(); await new Promise(r=>setTimeout(r,400)); }
+
+  S.probing = true;
+  S.probeAcks = 0;
+  const all = [...document.querySelectorAll("#probeGrid button")];
+  all.forEach(b=>b.disabled = true);
+  btn.classList.add("warn");
+  const st = $("probeStatus"); st.className = "live";
+
+  log(`▶ 方向探测【${label}】只发一帧：${hx}`, "a");
+  openLog();
+
+  try{ await write(parseHex(hx)); }
+  catch(e){ log("写入失败：" + (e.message||e), "e"); }
+
+  let left = PROBE_SECS;
+  const tick = ()=>{ st.textContent = `【${label}】观察中 ${left}s · 回包 ${S.probeAcks}`; };
+  tick();
+
+  await new Promise(res=>{
+    probeDone = res;
+    probeTimer = setInterval(()=>{
+      left--;
+      if(left <= 0){ probeFinish(); return; }
+      tick();
+    }, 1000);
+  });
+
+  st.textContent = `【${label}】结束 · 回包 ${S.probeAcks} 条`;
+  st.className = "";
+  S.probing = false;
+  all.forEach(b=>b.disabled = false);
+  btn.classList.remove("warn");
+}
+
+$("btnProbeStop").onclick = async ()=>{
+  probeFinish();
+  try{ await write(frame(0x06, 0, 1)); log("→ 停（0x06 翻转一次）", "a"); toast("已发停止"); }
+  catch(e){ log("停止失败：" + (e.message||e), "e"); }
+};
+
 /* 初始化 */
 render();
+paintSpin();
 if(!navigator.bluetooth){
   log("本浏览器不支持 Web Bluetooth，可点「演示模式」预览界面。","e");
   $("btnConn").textContent = "连接云台（此浏览器不支持）";
