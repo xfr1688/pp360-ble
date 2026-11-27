@@ -96,17 +96,6 @@
   .meta span{display:block;font-size:10px;color:var(--dim);letter-spacing:.05em;margin-bottom:3px}
   .meta b{font-size:12px;font-weight:500;font-variant-numeric:tabular-nums;white-space:nowrap}
 
-  /* ---------- 连续模式测试 ---------- */
-  .panel{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:14px 15px}
-  .panel-h{display:flex;justify-content:space-between;align-items:center;gap:8px;
-    font-size:13px;font-weight:600;margin-bottom:8px}
-  .panel-h span{font-size:11px;font-weight:400;color:var(--dim);font-variant-numeric:tabular-nums}
-  .panel-h span.live{color:var(--gold)}
-  .tests{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:6px}
-  .tests button{padding:10px 4px;font-size:12px;line-height:1.25;border-radius:11px}
-  .tests button small{display:block;font-size:9.5px;color:var(--dim);margin-top:3px}
-  .tests button.warn{border-color:#3b3020;color:#e3b871}
-
   /* ---------- 折叠区 ---------- */
   details{margin-top:14px;background:var(--panel);border:1px solid var(--line);border-radius:16px;overflow:hidden}
   details>summary{
@@ -225,16 +214,6 @@
     </div>
   </div>
 
-  <!-- 连续模式测试 -->
-  <div class="panel" style="margin-top:14px">
-    <div class="panel-h">命令号扫描 <span id="probeStatus">空闲</span></div>
-    <div style="font-size:11.5px;color:var(--dim);line-height:1.65;margin-bottom:6px">
-      点一个 → 只发这一帧 → 观察 4 秒。每次只测一个，把现象告诉我。
-    </div>
-    <div class="tests" id="probeGrid"></div>
-    <div class="row"><button class="danger" id="btnProbeStop">停止旋转（0x06）</button></div>
-  </div>
-
   <details>
     <summary>运行日志</summary>
     <div class="body"><div class="log" id="log"></div></div>
@@ -255,6 +234,7 @@
 
   <footer>
     <div>协议来自 com.deepai.paipai v2.2.6 的静态逆向 · 未使用任何第三方代码</div>
+    <div>实测结论：仅支持「正向 20°/步」与「0x06 连续旋转开关」，无反向指令</div>
     <div>适用 TL-6A / TL-6B / TL-6C · 仅供个人设备调试</div>
   </footer>
 </div>
@@ -368,7 +348,6 @@ function attachNotify(ch){
     // 应答帧：11 02 NN 17 06 02 00 01 11 88 MM 88 ...
     if(b.length >= 12 && b[1] === 0x02){
       // b[10] 是设备自己的“第几张”序号，只作参考；位置由本地步数累计
-      if(S.probing) S.probeAcks++;
       if(S.pendingAck){ const p=S.pendingAck; S.pendingAck=null; p(true); }
     }
   });
@@ -663,88 +642,6 @@ $("btnSpinStop").onclick = async ()=>{
     paintSpin();
     toast("已发停止");
   }catch(e){ log("停止失败：" + (e.message||e), "e"); }
-};
-
-/* ====================== 方向探测（单步 0x02） ====================== */
-const PROBE_SECS = 4;
-const PROBES = [
-  ["cmd 0C", "11 01 55 01 02 0C 00 01 11 88 88 88 00 00 00 0D 0A"],
-  ["cmd 0D", "11 01 55 01 02 0D 00 01 11 88 88 88 00 00 00 0D 0A"],
-  ["cmd 12", "11 01 55 01 02 12 00 01 11 88 88 88 00 00 00 0D 0A"],
-  ["cmd 13", "11 01 55 01 02 13 00 01 11 88 88 88 00 00 00 0D 0A"],
-  ["cmd 14", "11 01 55 01 02 14 00 01 11 88 88 88 00 00 00 0D 0A"],
-  ["cmd 15", "11 01 55 01 02 15 00 01 11 88 88 88 00 00 00 0D 0A"],
-  ["cmd 16", "11 01 55 01 02 16 00 01 11 88 88 88 00 00 00 0D 0A"],
-  ["cmd 17", "11 01 55 01 02 17 00 01 11 88 88 88 00 00 00 0D 0A"]
-];
-
-let probeTimer = null, probeDone = null;
-
-function parseHex(s){
-  const t = s.replace(/[^0-9a-fA-F]/g,"");
-  const a = new Uint8Array(t.length/2);
-  for(let i=0;i<a.length;i++) a[i] = parseInt(t.substr(i*2,2),16);
-  return a;
-}
-
-function buildProbes(){
-  const g = $("probeGrid");
-  PROBES.forEach(([label, hx])=>{
-    const b = document.createElement("button");
-    b.innerHTML = `${label}<small>${hx.split(" ").slice(3,6).join(" ")}</small>`;
-    b.onclick = ()=> probe(b, label, hx);
-    g.appendChild(b);
-  });
-}
-buildProbes();
-
-function probeFinish(){
-  if(probeTimer){ clearInterval(probeTimer); probeTimer=null; }
-  const d = probeDone; probeDone = null; if(d) d();
-}
-
-async function probe(btn, label, hx){
-  if(!S.w){ toast("还没连上云台"); return; }
-  if(S.probing){ toast("上一组还在观察，先按停止"); return; }
-  if(S.spin){ try{ await write(frame(0x06,0,1)); }catch(e){} S.spin=false; paintSpin(); await new Promise(r=>setTimeout(r,400)); }
-
-  S.probing = true;
-  S.probeAcks = 0;
-  const all = [...document.querySelectorAll("#probeGrid button")];
-  all.forEach(b=>b.disabled = true);
-  btn.classList.add("warn");
-  const st = $("probeStatus"); st.className = "live";
-
-  log(`▶ 方向探测【${label}】只发一帧：${hx}`, "a");
-  openLog();
-
-  try{ await write(parseHex(hx)); }
-  catch(e){ log("写入失败：" + (e.message||e), "e"); }
-
-  let left = PROBE_SECS;
-  const tick = ()=>{ st.textContent = `【${label}】观察中 ${left}s · 回包 ${S.probeAcks}`; };
-  tick();
-
-  await new Promise(res=>{
-    probeDone = res;
-    probeTimer = setInterval(()=>{
-      left--;
-      if(left <= 0){ probeFinish(); return; }
-      tick();
-    }, 1000);
-  });
-
-  st.textContent = `【${label}】结束 · 回包 ${S.probeAcks} 条`;
-  st.className = "";
-  S.probing = false;
-  all.forEach(b=>b.disabled = false);
-  btn.classList.remove("warn");
-}
-
-$("btnProbeStop").onclick = async ()=>{
-  probeFinish();
-  try{ await write(frame(0x06, 0, 1)); log("→ 停（0x06 翻转一次）", "a"); toast("已发停止"); }
-  catch(e){ log("停止失败：" + (e.message||e), "e"); }
 };
 
 /* 初始化 */
